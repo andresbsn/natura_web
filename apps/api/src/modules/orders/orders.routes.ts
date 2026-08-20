@@ -1,0 +1,187 @@
+import { Prisma } from '@prisma/client';
+import { Router } from 'express';
+import { z } from 'zod';
+
+import { prisma } from '../../db/prisma.js';
+import { AppError } from '../../http/errors.js';
+import { requireAuth } from '../auth/auth.middleware.js';
+import { mapOrder, orderInclude } from './order.mappers.js';
+
+export const ordersRouter = Router();
+
+ordersRouter.use(requireAuth);
+
+const orderItemSchema = z.object({
+  variantId: z.string().uuid(),
+  quantity: z.number().int().min(1).max(99),
+});
+
+const orderCreateSchema = z.object({
+  items: z.array(orderItemSchema).min(1),
+  deliveryMethodId: z.string().uuid().optional(),
+  deliveryAddress: z.string().max(300).optional(),
+  deliveryNotes: z.string().max(600).optional(),
+});
+
+ordersRouter.get('/', async (req, res, next) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: { customerId: req.user!.id },
+      orderBy: { createdAt: 'desc' },
+      include: orderInclude,
+    });
+
+    res.json({ orders: orders.map(mapOrder) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+ordersRouter.post('/', async (req, res, next) => {
+  try {
+    const data = orderCreateSchema.parse(req.body);
+    const order = await prisma.$transaction(async (tx) => {
+      const customer = await tx.user.findUnique({ where: { id: req.user!.id } });
+
+      if (!customer || !customer.isActive) {
+        throw new AppError(404, 'User not found', 'USER_NOT_FOUND');
+      }
+
+      const variantIds = data.items.map((item) => item.variantId);
+      const variants = await tx.productVariant.findMany({
+        where: { id: { in: variantIds }, isActive: true, product: { isActive: true } },
+        include: {
+          product: true,
+          prices: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+      });
+      const variantsById = new Map(variants.map((variant) => [variant.id, variant]));
+      const reservations = await tx.stockMovement.groupBy({
+        by: ['variantId'],
+        where: {
+          variantId: { in: variantIds },
+          type: 'ORDER_RESERVED',
+          order: { status: { in: ['PENDING', 'CONFIRMED', 'PREPARING'] } },
+        },
+        _sum: { quantity: true },
+      });
+      const reservedByVariantId = new Map(reservations.map((reservation) => [reservation.variantId, reservation._sum.quantity ?? 0]));
+      const deliveryMethod = data.deliveryMethodId
+        ? await tx.deliveryMethod.findFirst({ where: { id: data.deliveryMethodId, isActive: true } })
+        : null;
+
+      if (data.deliveryMethodId && !deliveryMethod) {
+        throw new AppError(400, 'Delivery method is not available', 'DELIVERY_METHOD_UNAVAILABLE');
+      }
+
+      const orderItems = data.items.map((item) => {
+        const variant = variantsById.get(item.variantId);
+        const price = variant?.prices[0];
+
+        if (!variant || !price) {
+          throw new AppError(400, 'Product is not available', 'PRODUCT_UNAVAILABLE');
+        }
+
+        const availableStock = variant.stockQuantity - (reservedByVariantId.get(variant.id) ?? 0);
+
+        if (availableStock < item.quantity) {
+          throw new AppError(409, `Stock insuficiente para ${variant.product.name}`, 'INSUFFICIENT_STOCK');
+        }
+
+        const unitPrice = price.amount;
+        const lineTotal = unitPrice.mul(item.quantity);
+
+        return {
+          variantId: variant.id,
+          productNameSnapshot: variant.product.name,
+          variantNameSnapshot: variant.name,
+          skuSnapshot: variant.sku,
+          unitPrice,
+          quantity: item.quantity,
+          lineTotal,
+        };
+      });
+      const subtotal = orderItems.reduce((total, item) => total.add(item.lineTotal), new Prisma.Decimal(0));
+      const deliveryCost = deliveryMethod?.cost ?? new Prisma.Decimal(0);
+      const total = subtotal.add(deliveryCost);
+
+      const created = await tx.order.create({
+        data: {
+          customerId: customer.id,
+          deliveryMethodId: deliveryMethod?.id,
+          customerFirstName: customer.firstName,
+          customerLastName: customer.lastName,
+          customerEmail: customer.email,
+          customerPhone: customer.phone,
+          deliveryAddress: data.deliveryAddress,
+          deliveryNotes: data.deliveryNotes,
+          subtotal,
+          deliveryCost,
+          total,
+          items: { create: orderItems },
+        },
+        include: orderInclude,
+      });
+
+      await tx.stockMovement.createMany({
+        data: data.items.map((item) => ({
+          variantId: item.variantId,
+          orderId: created.id,
+          actorId: customer.id,
+          type: 'ORDER_RESERVED',
+          quantity: item.quantity,
+          reason: 'Reserva por pedido cliente',
+        })),
+      });
+
+      return created;
+    });
+
+    res.status(201).json({ order: mapOrder(order) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+ordersRouter.patch('/:id/cancel', async (req, res, next) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const order = await prisma.$transaction(async (tx) => {
+      const existing = await tx.order.findFirst({
+        where: { id, customerId: req.user!.id },
+        include: { items: true },
+      });
+
+      if (!existing) {
+        throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+      }
+
+      if (existing.status !== 'PENDING') {
+        throw new AppError(409, 'Only pending orders can be cancelled by customer', 'ORDER_NOT_CANCELLABLE');
+      }
+
+      const updated = await tx.order.update({
+        where: { id },
+        data: { status: 'CANCELLED', cancelledAt: new Date() },
+        include: orderInclude,
+      });
+
+      await tx.stockMovement.createMany({
+        data: existing.items.map((item) => ({
+          variantId: item.variantId,
+          orderId: id,
+          actorId: req.user!.id,
+          type: 'ORDER_RELEASED',
+          quantity: item.quantity,
+          reason: 'Cancelacion cliente',
+        })),
+      });
+
+      return updated;
+    });
+
+    res.json({ order: mapOrder(order) });
+  } catch (error) {
+    next(error);
+  }
+});

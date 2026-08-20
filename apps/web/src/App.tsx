@@ -1,0 +1,859 @@
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+
+type CatalogProduct = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  line: string | null;
+  isActive: boolean;
+  category: { id: string; name: string; slug: string } | null;
+  images: Array<{ url: string; altText: string | null }>;
+  variants: Array<{
+    id: string;
+    sku: string;
+    name: string;
+    stockQuantity: number;
+    availableStock: number;
+    reservedQuantity: number;
+    currentPrice: { amount: number } | null;
+  }>;
+};
+
+type Category = {
+  id: string;
+  name: string;
+  slug: string;
+  isActive: boolean;
+};
+
+type AuthUser = {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  phone: string | null;
+  role: 'CUSTOMER' | 'ADMIN' | 'SUPER_ADMIN';
+};
+
+type CartItem = {
+  variantId: string;
+  quantity: number;
+};
+
+type Order = {
+  id: string;
+  status: string;
+  paymentStatus: string;
+  customer: { email: string; firstName: string; lastName: string; phone: string | null };
+  deliveryMethod: { id: string; name: string; cost: number } | null;
+  deliveryAddress: string | null;
+  deliveryNotes: string | null;
+  subtotal: number;
+  deliveryCost: number;
+  total: number;
+  items: Array<{ id: string; variantId: string; productName: string; variantName: string; quantity: number; unitPrice: number; lineTotal: number }>;
+  payments: Array<{ id: string; amount: number; status: string; method: string | null; notes: string | null; paidAt: string | null; createdAt: string }>;
+  createdAt: string;
+};
+
+type DeliveryMethod = {
+  id: string;
+  name: string;
+  description: string | null;
+  cost: number;
+  requiresAddress: boolean;
+  isActive: boolean;
+};
+
+type AdminUser = AuthUser & {
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+const promoSlides = [
+  { title: 'Promos de catalogo', text: 'Seleccion de productos con precios actualizados y stock administrado.' },
+  { title: 'Pedidos registrados', text: 'Armá tu carrito, iniciá sesión y confirmá tu pedido online.' },
+  { title: 'Entrega coordinada', text: 'Retiro, envio local o correo segun disponibilidad.' },
+];
+
+function isAdmin(user: AuthUser | null) {
+  return user?.role === 'ADMIN' || user?.role === 'SUPER_ADMIN';
+}
+
+function slugify(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+async function apiRequest<T>(path: string, options: RequestInit = {}) {
+  const isFormData = options.body instanceof FormData;
+  const response = await fetch(`${apiUrl}${path}`, {
+    ...options,
+    credentials: 'include',
+    headers: isFormData ? options.headers : { 'Content-Type': 'application/json', ...options.headers },
+  });
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(error?.error?.message ?? 'Error de API');
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
+}
+
+function imageSource(url: string) {
+  return url.startsWith('http') ? url : `${apiUrl}${url}`;
+}
+
+function formatPrice(amount: number) {
+  return amount.toLocaleString('es-AR', { currency: 'ARS', maximumFractionDigits: 0, style: 'currency' });
+}
+
+function productVariant(product: CatalogProduct) {
+  return product.variants[0] ?? null;
+}
+
+function handleModalKeyDown(event: KeyboardEvent<HTMLElement>, onClose: () => void) {
+  if (event.key === 'Escape') {
+    onClose();
+    return;
+  }
+
+  if (event.key !== 'Tab') return;
+
+  const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])')).filter((element) => !element.hasAttribute('disabled'));
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+
+  if (!first || !last) return;
+
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  }
+
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function Nav({ cartCount, user, navigate, path }: { cartCount: number; user: AuthUser | null; navigate: (path: string) => void; path: string }) {
+  const links = [
+    ['/', 'Home'],
+    ['/productos', 'Productos'],
+    ['/carrito', `Carrito (${cartCount})`],
+    ...(user ? [['/mis-pedidos', 'Mis pedidos']] : []),
+    ...(isAdmin(user) ? [['/admin', 'Admin']] : []),
+    [user ? '/cuenta' : '/login', user ? user.firstName : 'Ingresar'],
+  ];
+
+  return (
+    <nav className="nav" aria-label="Principal">
+      <button className="brand" type="button" onClick={() => navigate('/')}>Natura reseller</button>
+      <div className="navLinks">
+        {links.map(([href, label]) => (
+          <button className={path === href || (href === '/admin' && path.startsWith('/admin')) ? 'active' : ''} key={href} type="button" onClick={() => navigate(href)}>{label}</button>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
+function ProductCard({ product, onAdd }: { product: CatalogProduct; onAdd: (product: CatalogProduct) => void }) {
+  const variant = productVariant(product);
+  const image = product.images[0];
+
+  return (
+    <article className="productCard">
+      <div className="productImage">
+        {image ? <img src={imageSource(image.url)} alt={image.altText ?? product.name} loading="lazy" /> : <span>Sin imagen</span>}
+      </div>
+      <div className="productInfo">
+        <span>{product.category?.name ?? product.line ?? 'Producto'}</span>
+        <h3>{product.name}</h3>
+        <p>{product.description || 'Producto disponible para el catalogo.'}</p>
+        <div className="productMeta">
+          <strong>{variant?.currentPrice ? formatPrice(variant.currentPrice.amount) : 'Sin precio'}</strong>
+          <small>{variant ? `Disponible: ${variant.availableStock}` : 'Sin variantes'}</small>
+        </div>
+        <button disabled={!variant || !variant.currentPrice || variant.availableStock < 1} type="button" onClick={() => onAdd(product)}>
+          Agregar al carrito
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="footer">
+      <div>
+        <strong>Natura reseller</strong>
+        <p>Catalogo de revendedora independiente. No es tienda oficial Natura.</p>
+      </div>
+      <div>
+        <strong>Contacto</strong>
+        <p>Consultas, pedidos y entregas coordinadas por mensaje.</p>
+      </div>
+      <div>
+        <strong>Redes</strong>
+        <a href="https://instagram.com/" rel="noreferrer" target="_blank">Instagram</a>
+      </div>
+    </footer>
+  );
+}
+
+export function App() {
+  const [path, setPath] = useState(() => window.location.pathname);
+  const [products, setProducts] = useState<CatalogProduct[]>([]);
+  const [adminProducts, setAdminProducts] = useState<CatalogProduct[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [deliveryMethods, setDeliveryMethods] = useState<DeliveryMethod[]>([]);
+  const [selectedProductId, setSelectedProductId] = useState('');
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [cart, setCart] = useState<CartItem[]>(() => JSON.parse(localStorage.getItem('cart') ?? '[]') as CartItem[]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [token, setToken] = useState(() => localStorage.getItem('accessToken') ?? '');
+  const [user, setUser] = useState<AuthUser | null>(() => JSON.parse(localStorage.getItem('user') ?? 'null') as AuthUser | null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function navigate(nextPath: string) {
+    window.history.pushState(null, '', nextPath);
+    setPath(nextPath);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function loadCatalog() {
+    setIsLoading(true);
+    setCatalogError(null);
+
+    try {
+      const [productsData, categoriesData, deliveryMethodsData] = await Promise.all([
+        apiRequest<{ products: CatalogProduct[] }>('/api/catalog/products'),
+        apiRequest<{ categories: Category[] }>('/api/catalog/categories'),
+        apiRequest<{ deliveryMethods: DeliveryMethod[] }>('/api/catalog/delivery-methods'),
+      ]);
+      setProducts(productsData.products);
+      setCategories(categoriesData.categories);
+      setDeliveryMethods(deliveryMethodsData.deliveryMethods);
+    } catch (requestError) {
+      setCatalogError(requestError instanceof Error ? requestError.message : 'Error inesperado');
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  const loadOrders = useCallback(async (accessToken = token) => {
+    if (!accessToken) return;
+    const data = await apiRequest<{ orders: Order[] }>('/api/orders', { headers: { Authorization: `Bearer ${accessToken}` } });
+    setOrders(data.orders);
+  }, [token]);
+
+  const loadAdminData = useCallback(async (accessToken = token) => {
+    if (!accessToken || !isAdmin(user)) return;
+    const [adminProductsData, adminOrdersData, adminUsersData, deliveryMethodsData] = await Promise.all([
+      apiRequest<{ products: CatalogProduct[] }>('/api/admin/products', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      apiRequest<{ orders: Order[] }>('/api/admin/orders', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      apiRequest<{ users: AdminUser[] }>('/api/admin/users', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      apiRequest<{ deliveryMethods: DeliveryMethod[] }>('/api/admin/delivery-methods', { headers: { Authorization: `Bearer ${accessToken}` } }),
+    ]);
+    setAdminProducts(adminProductsData.products);
+    setOrders(adminOrdersData.orders);
+    setAdminUsers(adminUsersData.users);
+    setDeliveryMethods(deliveryMethodsData.deliveryMethods);
+  }, [token, user]);
+
+  useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', onPopState);
+    void loadCatalog();
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('cart', JSON.stringify(cart));
+  }, [cart]);
+
+  useEffect(() => {
+    if (!token) return;
+    void loadOrders(token).catch(() => undefined);
+  }, [loadOrders, token]);
+
+  useEffect(() => {
+    if (!token || !isAdmin(user)) return;
+    void loadAdminData(token).catch(() => undefined);
+  }, [loadAdminData, token, user]);
+
+  const cartProducts = cart
+    .map((item) => {
+      const product = products.find((candidate) => candidate.variants.some((variant) => variant.id === item.variantId));
+      const variant = product?.variants.find((candidate) => candidate.id === item.variantId) ?? null;
+      return product && variant ? { product, variant, quantity: item.quantity } : null;
+    })
+    .filter((item): item is { product: CatalogProduct; variant: CatalogProduct['variants'][number]; quantity: number } => Boolean(item));
+  const cartTotal = cartProducts.reduce((total, item) => total + (item.variant.currentPrice?.amount ?? 0) * item.quantity, 0);
+  const cartCount = cart.reduce((total, item) => total + item.quantity, 0);
+  const selectedProduct = adminProducts.find((product) => product.id === selectedProductId) ?? null;
+  const featuredProducts = [...products].sort((a, b) => a.id.localeCompare(b.id)).slice(0, 5);
+
+  function addToCart(product: CatalogProduct) {
+    const variant = productVariant(product);
+    if (!variant || variant.availableStock < 1) return;
+    setCart((current) => {
+      const existing = current.find((item) => item.variantId === variant.id);
+      if (existing) {
+        if (existing.quantity >= variant.availableStock) return current;
+        return current.map((item) => (item.variantId === variant.id ? { ...item, quantity: item.quantity + 1 } : item));
+      }
+      return [...current, { variantId: variant.id, quantity: 1 }];
+    });
+    setMessage(`${product.name} agregado al carrito`);
+  }
+
+  function updateCartQuantity(variantId: string, quantity: number) {
+    if (quantity < 1) {
+      setCart((current) => current.filter((item) => item.variantId !== variantId));
+      return;
+    }
+    const product = products.find((candidate) => candidate.variants.some((variant) => variant.id === variantId));
+    const availableStock = product?.variants.find((variant) => variant.id === variantId)?.availableStock ?? quantity;
+    setCart((current) => current.map((item) => (item.variantId === variantId ? { ...item, quantity: Math.min(quantity, availableStock) } : item)));
+  }
+
+  function storeSession(accessToken: string, authUser: AuthUser) {
+    localStorage.setItem('accessToken', accessToken);
+    localStorage.setItem('user', JSON.stringify(authUser));
+    setToken(accessToken);
+    setUser(authUser);
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setMessage(null);
+    const form = new FormData(event.currentTarget);
+
+    try {
+      const data = await apiRequest<{ accessToken: string; user: AuthUser }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email: form.get('email'), password: form.get('password') }),
+      });
+      storeSession(data.accessToken, data.user);
+      setMessage(`Sesion iniciada como ${data.user.firstName}`);
+      navigate(isAdmin(data.user) ? '/admin/productos' : '/productos');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'No se pudo iniciar sesion');
+    }
+  }
+
+  async function handleRegister(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setMessage(null);
+    const form = new FormData(event.currentTarget);
+    const password = String(form.get('password') ?? '');
+
+    if (password !== form.get('confirmPassword')) {
+      setError('Las contrasenas no coinciden');
+      return;
+    }
+
+    try {
+      const data = await apiRequest<{ accessToken: string; user: AuthUser }>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          firstName: form.get('firstName'),
+          lastName: form.get('lastName'),
+          email: form.get('email'),
+          phone: form.get('phone'),
+          password,
+        }),
+      });
+      storeSession(data.accessToken, data.user);
+      setMessage('Registro creado. Ya podes confirmar pedidos.');
+      navigate('/productos');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'No se pudo crear el usuario');
+    }
+  }
+
+  async function logout() {
+    await apiRequest('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('user');
+    setToken('');
+    setUser(null);
+    setOrders([]);
+    setAdminProducts([]);
+    setAdminUsers([]);
+    navigate('/');
+  }
+
+  async function handleCreateOrder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setMessage(null);
+
+    if (!token) {
+      navigate('/login');
+      return;
+    }
+
+    const form = new FormData(event.currentTarget);
+    const deliveryType = deliveryMethods.find((method) => method.id === form.get('deliveryMethodId'))?.name ?? 'Coordinar entrega';
+
+    try {
+      await apiRequest<{ order: Order }>('/api/orders', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          items: cart.map((item) => ({ variantId: item.variantId, quantity: item.quantity })),
+          deliveryMethodId: form.get('deliveryMethodId') || undefined,
+          deliveryAddress: form.get('deliveryAddress') || undefined,
+          deliveryNotes: String(form.get('deliveryNotes') ?? '').trim() || deliveryType,
+        }),
+      });
+      setCart([]);
+      setMessage('Pedido creado. La administradora lo va a revisar y confirmar.');
+      await loadOrders();
+      navigate('/mis-pedidos');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'No se pudo crear el pedido');
+    }
+  }
+
+  async function handleCreateCategory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get('categoryName') ?? '');
+    await apiRequest('/api/admin/categories', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ name, slug: String(form.get('categorySlug') || slugify(name)) }),
+    });
+    event.currentTarget.reset();
+    await loadCatalog();
+    await loadAdminData();
+  }
+
+  async function handleCreateProduct(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get('productName') ?? '');
+    const image = form.get('image');
+    const body = new FormData();
+    body.append('categoryId', String(form.get('categoryId') ?? ''));
+    body.append('name', name);
+    body.append('slug', String(form.get('productSlug') || slugify(name)));
+    body.append('description', String(form.get('description') ?? ''));
+    body.append('line', String(form.get('line') ?? ''));
+    body.append('sku', String(form.get('sku') ?? ''));
+    body.append('variantName', String(form.get('variantName') ?? 'Unidad'));
+    body.append('stockQuantity', String(form.get('stockQuantity') ?? 0));
+    body.append('price', String(form.get('price') ?? 0));
+    if (image instanceof File && image.size > 0) body.append('image', image);
+    await apiRequest('/api/admin/products', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body });
+    event.currentTarget.reset();
+    setMessage('Producto creado');
+    await loadCatalog();
+    await loadAdminData();
+  }
+
+  async function handleUpdateProduct(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const image = form.get('editImage');
+    const body = new FormData();
+    body.append('categoryId', String(form.get('editCategoryId') ?? ''));
+    body.append('name', String(form.get('editProductName') ?? ''));
+    body.append('slug', String(form.get('editProductSlug') ?? ''));
+    body.append('description', String(form.get('editDescription') ?? ''));
+    body.append('line', String(form.get('editLine') ?? ''));
+    body.append('isActive', String(form.get('editIsActive') === 'on'));
+    body.append('sku', String(form.get('editSku') ?? ''));
+    body.append('variantName', String(form.get('editVariantName') ?? 'Unidad'));
+    body.append('stockQuantity', String(form.get('editStockQuantity') ?? 0));
+    body.append('price', String(form.get('editPrice') ?? 0));
+    if (image instanceof File && image.size > 0) body.append('image', image);
+    await apiRequest(`/api/admin/products/${form.get('editProductId')}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body });
+    setMessage('Producto actualizado');
+    await loadCatalog();
+    await loadAdminData();
+  }
+
+  async function updateAdminOrder(id: string, status: string, paymentStatus: string) {
+    await apiRequest(`/api/admin/orders/${id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ status, paymentStatus }),
+    });
+    await loadAdminData();
+  }
+
+  async function updateAdminUser(id: string, isActive: boolean, password?: string) {
+    await apiRequest(`/api/admin/users/${id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ isActive, password: password || undefined }),
+    });
+    await loadAdminData();
+  }
+
+  async function upsertDeliveryMethod(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const id = String(form.get('deliveryMethodId') ?? '');
+    await apiRequest(`/api/admin/delivery-methods${id ? `/${id}` : ''}`, {
+      method: id ? 'PATCH' : 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        name: form.get('deliveryName'),
+        description: form.get('deliveryDescription') || undefined,
+        cost: Number(form.get('deliveryCost') ?? 0),
+        requiresAddress: form.get('deliveryRequiresAddress') === 'on',
+        isActive: form.get('deliveryIsActive') === 'on',
+      }),
+    });
+    event.currentTarget.reset();
+    await loadCatalog();
+    await loadAdminData();
+  }
+
+  async function registerOrderPayment(id: string, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await apiRequest(`/api/admin/orders/${id}/payments`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        amount: Number(form.get('amount') ?? 0),
+        method: form.get('method') || undefined,
+        notes: form.get('notes') || undefined,
+      }),
+    });
+    event.currentTarget.reset();
+    await loadAdminData();
+  }
+
+  function renderPage() {
+    if (path === '/productos') return <ProductsPage isLoading={isLoading} catalogError={catalogError} products={products} onAdd={addToCart} />;
+    if (path === '/login') return <LoginPage error={error} message={message} onLogin={handleLogin} navigate={navigate} />;
+    if (path === '/registro') return <RegisterPage error={error} message={message} onRegister={handleRegister} navigate={navigate} />;
+    if (path === '/carrito') return <CartPage cartProducts={cartProducts} deliveryMethods={deliveryMethods} total={cartTotal} user={user} navigate={navigate} onQuantity={updateCartQuantity} onCreateOrder={handleCreateOrder} error={error} message={message} />;
+    if (path === '/mis-pedidos') return <OrdersPage orders={orders} user={user} navigate={navigate} />;
+    if (path === '/cuenta') return <AccountPage user={user} onLogout={logout} navigate={navigate} />;
+    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} />;
+    return <HomePage products={featuredProducts} onAdd={addToCart} navigate={navigate} />;
+  }
+
+  return (
+    <main>
+      <Nav cartCount={cartCount} user={user} navigate={navigate} path={path} />
+      {message && path !== '/login' && path !== '/registro' && <p className="toast successText">{message}</p>}
+      {renderPage()}
+      <Footer />
+    </main>
+  );
+}
+
+function HomePage({ products, onAdd, navigate }: { products: CatalogProduct[]; onAdd: (product: CatalogProduct) => void; navigate: (path: string) => void }) {
+  return (
+    <>
+      <header className="hero">
+        <section className="heroGrid">
+          <div className="heroCopy">
+            <p className="eyebrow">Catalogo Natura por revendedora</p>
+            <h1>Productos para cuidar tu rutina de todos los dias.</h1>
+            <p className="lead">Comprá productos de belleza, perfumeria y cuidado personal con registro, carrito y pedidos coordinados.</p>
+            <div className="actions">
+              <button className="primary" type="button" onClick={() => navigate('/productos')}>Ver productos</button>
+              <button className="secondary" type="button" onClick={() => navigate('/registro')}>Registrarme</button>
+            </div>
+          </div>
+          <aside className="promoSlider" aria-label="Promociones destacadas">
+            {promoSlides.map((slide, index) => (
+              <article className="promoCard" key={slide.title}>
+                <span>Destacado {index + 1}</span>
+                <h2>{slide.title}</h2>
+                <p>{slide.text}</p>
+              </article>
+            ))}
+          </aside>
+        </section>
+      </header>
+
+      <section className="section aboutSection">
+        <div>
+          <p className="eyebrow">De que se trata</p>
+          <h2>Una forma simple de pedir Natura online.</h2>
+        </div>
+        <div className="aboutContent">
+          <p>Este catalogo pertenece a una revendedora independiente. Reune productos disponibles, precios actualizados y pedidos registrados para coordinar preparacion, pago y entrega.</p>
+        </div>
+      </section>
+
+      <section className="section">
+        <div className="moduleGrid">
+          <article className="module imageModule"><span>Pedido</span><h3>Registrate y pedí</h3><p>Creá tu cuenta para confirmar pedidos y consultar el estado desde la web.</p></article>
+          <article className="module"><span>Envios</span><h3>Opciones flexibles</h3><p>Retiro, envio local o correo. La opcion final se coordina al confirmar el pedido.</p></article>
+          <article className="module"><span>Admin</span><h3>Gestion centralizada</h3><p>La administradora recibe pedidos, actualiza estados y gestiona productos y clientes.</p></article>
+        </div>
+      </section>
+
+      <section className="section featuredProducts">
+        <div className="sectionHeader">
+          <div><p className="eyebrow">Productos destacados</p><h2>Favoritos para sumar al pedido.</h2></div>
+          <button className="textLink" type="button" onClick={() => navigate('/productos')}>Ver todos</button>
+        </div>
+        <div className="productGrid">{products.map((product) => <ProductCard key={product.id} product={product} onAdd={onAdd} />)}</div>
+      </section>
+    </>
+  );
+}
+
+function ProductsPage({ isLoading, catalogError, products, onAdd }: { isLoading: boolean; catalogError: string | null; products: CatalogProduct[]; onAdd: (product: CatalogProduct) => void }) {
+  const [search, setSearch] = useState('');
+  const normalized = search.trim().toLowerCase();
+  const filtered = normalized
+    ? products.filter((product) => [product.name, product.description, product.line, product.category?.name].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalized)))
+    : products;
+
+  return (
+    <section className="section pageSection">
+      <div className="sectionHeader"><div><p className="eyebrow">Catalogo</p><h1>Todos los productos.</h1></div></div>
+      <input className="searchInput" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por producto, categoria o linea" />
+      {isLoading ? <p className="statusText">Cargando productos...</p> : null}
+      {catalogError ? <p className="statusText errorText">{catalogError}</p> : null}
+      {!isLoading && !catalogError && filtered.length === 0 ? <p className="statusText">No encontramos productos para esa busqueda.</p> : null}
+      <div className="productGrid">{filtered.map((product) => <ProductCard key={product.id} product={product} onAdd={onAdd} />)}</div>
+    </section>
+  );
+}
+
+function LoginPage({ error, message, onLogin, navigate }: { error: string | null; message: string | null; onLogin: (event: FormEvent<HTMLFormElement>) => void; navigate: (path: string) => void }) {
+  return <AuthShell title="Iniciar sesion" error={error} message={message}><form className="adminForm compactForm" onSubmit={onLogin}><label>Email<input name="email" type="email" required /></label><label>Contrasena<input name="password" type="password" required /></label><button type="submit">Ingresar</button><button className="secondaryButton" type="button" onClick={() => navigate('/registro')}>Crear cuenta cliente</button></form></AuthShell>;
+}
+
+function RegisterPage({ error, message, onRegister, navigate }: { error: string | null; message: string | null; onRegister: (event: FormEvent<HTMLFormElement>) => void; navigate: (path: string) => void }) {
+  return <AuthShell title="Registro de cliente" error={error} message={message}><form className="adminForm compactForm" onSubmit={onRegister}><div className="formRow"><label>Nombre<input name="firstName" required /></label><label>Apellido<input name="lastName" required /></label></div><label>Email<input name="email" type="email" required /></label><label>Telefono<input name="phone" /></label><div className="formRow"><label>Contrasena<input name="password" type="password" minLength={8} required /></label><label>Repetir contrasena<input name="confirmPassword" type="password" minLength={8} required /></label></div><button type="submit">Registrarme</button><button className="secondaryButton" type="button" onClick={() => navigate('/login')}>Ya tengo cuenta</button></form></AuthShell>;
+}
+
+function AuthShell({ title, error, message, children }: { title: string; error: string | null; message: string | null; children: React.ReactNode }) {
+  return <section className="section authSection"><p className="eyebrow">Cuenta</p><h1>{title}</h1>{message ? <p className="statusText successText">{message}</p> : null}{error ? <p className="statusText errorText">{error}</p> : null}{children}</section>;
+}
+
+function CartPage({ cartProducts, deliveryMethods, total, user, navigate, onQuantity, onCreateOrder, error, message }: { cartProducts: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number]; quantity: number }>; deliveryMethods: DeliveryMethod[]; total: number; user: AuthUser | null; navigate: (path: string) => void; onQuantity: (variantId: string, quantity: number) => void; onCreateOrder: (event: FormEvent<HTMLFormElement>) => void; error: string | null; message: string | null }) {
+  const [deliveryMethodId, setDeliveryMethodId] = useState('');
+  const selectedDeliveryMethod = deliveryMethods.find((method) => method.id === deliveryMethodId) ?? null;
+  const orderTotal = total + (selectedDeliveryMethod?.cost ?? 0);
+
+  return <section className="section pageSection"><p className="eyebrow">Carrito</p><h1>Tu pedido.</h1>{message ? <p className="statusText successText">{message}</p> : null}{error ? <p className="statusText errorText">{error}</p> : null}{cartProducts.length === 0 ? <p className="statusText">El carrito esta vacio.</p> : <div className="cartLayout"><div className="cartList">{cartProducts.map(({ product, variant, quantity }) => <article className="cartItem" key={variant.id}><strong>{product.name}</strong><span>{variant.name}</span><span>{formatPrice((variant.currentPrice?.amount ?? 0) * quantity)}</span><input max={variant.availableStock} min="1" type="number" value={quantity} onChange={(event) => onQuantity(variant.id, Number(event.target.value))} /><button type="button" onClick={() => onQuantity(variant.id, 0)}>Quitar</button></article>)}</div><form className="adminForm checkoutForm" onSubmit={onCreateOrder}><h3>Total: {formatPrice(orderTotal)}</h3><label>Tipo de entrega<select name="deliveryMethodId" value={deliveryMethodId} onChange={(event) => setDeliveryMethodId(event.target.value)}><option value="">Coordinar entrega</option>{deliveryMethods.map((method) => <option key={method.id} value={method.id}>{method.name} · {formatPrice(method.cost)}</option>)}</select></label>{selectedDeliveryMethod?.description ? <p className="statusText">{selectedDeliveryMethod.description}</p> : null}<label>Direccion si corresponde<textarea name="deliveryAddress" rows={3} required={Boolean(selectedDeliveryMethod?.requiresAddress)} /></label><label>Notas<textarea name="deliveryNotes" rows={3} /></label>{!user ? <p className="statusText">Para confirmar tenes que iniciar sesion o registrarte.</p> : null}<button type="submit">{user ? 'Confirmar pedido' : 'Iniciar sesion para confirmar'}</button><button className="secondaryButton" type="button" onClick={() => navigate('/productos')}>Seguir comprando</button></form></div>}</section>;
+}
+
+function OrdersPage({ orders, user, navigate }: { orders: Order[]; user: AuthUser | null; navigate: (path: string) => void }) {
+  if (!user) return <section className="section"><p className="statusText">Inicia sesion para ver tus pedidos.</p><button className="primary" type="button" onClick={() => navigate('/login')}>Ingresar</button></section>;
+  return <section className="section pageSection"><p className="eyebrow">Historial</p><h1>Mis pedidos.</h1>{orders.length === 0 ? <p className="statusText">Todavia no tenes pedidos.</p> : <OrderList orders={orders} />}</section>;
+}
+
+function AccountPage({ user, onLogout, navigate }: { user: AuthUser | null; onLogout: () => void; navigate: (path: string) => void }) {
+  if (!user) return <section className="section"><p className="statusText">No hay sesion activa.</p><button className="primary" type="button" onClick={() => navigate('/login')}>Ingresar</button></section>;
+  return <section className="section authSection"><p className="eyebrow">Cuenta</p><h1>{user.firstName} {user.lastName}</h1><p className="statusText">{user.email} · {user.role}</p><button className="primary" type="button" onClick={onLogout}>Cerrar sesion</button></section>;
+}
+
+/*
+function AdminPage(props: { user: AuthUser | null; navigate: (path: string) => void; products: CatalogProduct[]; categories: Category[]; orders: Order[]; users: AdminUser[]; selectedProduct: CatalogProduct | null; selectedProductId: string; setSelectedProductId: (id: string) => void; onCreateCategory: (event: FormEvent<HTMLFormElement>) => void; onCreateProduct: (event: FormEvent<HTMLFormElement>) => void; onUpdateProduct: (event: FormEvent<HTMLFormElement>) => void; onUpdateOrder: (id: string, status: string, paymentStatus: string) => void; onUpdateUser: (id: string, isActive: boolean, password?: string) => void }) {
+  if (!isAdmin(props.user)) return <section className="section"><p className="statusText errorText">Necesitas permisos de admin.</p><button className="primary" type="button" onClick={() => props.navigate('/login')}>Ingresar</button></section>;
+  return <section className="section adminPanel"><p className="eyebrow">Panel admin</p><h1>Gestion de tienda.</h1><div className="adminTabs"><ProductAdmin {...props} /><OrderAdmin orders={props.orders} onUpdateOrder={props.onUpdateOrder} /><UserAdmin users={props.users} onUpdateUser={props.onUpdateUser} /></div></section>;
+}
+
+function ProductAdmin({ products, categories, selectedProduct, selectedProductId, setSelectedProductId, onCreateCategory, onCreateProduct, onUpdateProduct }: Parameters<typeof AdminPage>[0]) {
+  return <section className="adminBlock"><h2>Productos</h2><div className="adminGrid"><form className="adminForm" onSubmit={onCreateCategory}><h3>Nueva categoria</h3><label>Nombre<input name="categoryName" required /></label><label>Slug opcional<input name="categorySlug" /></label><button type="submit">Crear categoria</button></form><form className="adminForm" onSubmit={onCreateProduct}><h3>Nuevo producto</h3><label>Categoria<select name="categoryId" defaultValue=""><option value="">Sin categoria</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Nombre<input name="productName" required /></label><label>Slug opcional<input name="productSlug" /></label><label>Linea<input name="line" /></label><label>Descripcion<textarea name="description" rows={4} /></label><label>Imagen<input name="image" type="file" accept="image/jpeg,image/png,image/webp" /></label><div className="formRow"><label>SKU<input name="sku" required /></label><label>Variante<input name="variantName" required defaultValue="Unidad" /></label></div><div className="formRow"><label>Stock<input name="stockQuantity" type="number" min="0" required defaultValue="0" /></label><label>Precio<input name="price" type="number" min="0.01" step="0.01" required /></label></div><button type="submit">Crear producto</button></form><section className="adminForm productManager"><h3>Productos existentes</h3><div className="adminProductList">{products.map((product) => <button className={product.id === selectedProductId ? 'productListItem active' : 'productListItem'} key={product.id} type="button" onClick={() => setSelectedProductId(product.id)}><span>{product.name}</span><small>{product.variants[0]?.stockQuantity ?? 0} u.</small></button>)}</div></section>{selectedProduct ? <form className="adminForm productEditor" key={selectedProduct.id} onSubmit={onUpdateProduct}><h3>Editar producto</h3><input name="editProductId" type="hidden" value={selectedProduct.id} /><label>Categoria<select name="editCategoryId" defaultValue={selectedProduct.category?.id ?? ''}><option value="">Sin categoria</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Nombre<input name="editProductName" required defaultValue={selectedProduct.name} /></label><label>Slug<input name="editProductSlug" required defaultValue={selectedProduct.slug} /></label><label>Linea<input name="editLine" defaultValue={selectedProduct.line ?? ''} /></label><label>Descripcion<textarea name="editDescription" rows={4} defaultValue={selectedProduct.description ?? ''} /></label><label>Reemplazar imagen<input name="editImage" type="file" accept="image/jpeg,image/png,image/webp" /></label><label className="checkboxLabel"><input name="editIsActive" type="checkbox" defaultChecked={selectedProduct.isActive} />Producto activo</label><div className="formRow"><label>SKU<input name="editSku" required defaultValue={selectedProduct.variants[0]?.sku ?? ''} /></label><label>Variante<input name="editVariantName" required defaultValue={selectedProduct.variants[0]?.name ?? 'Unidad'} /></label></div><div className="formRow"><label>Stock<input name="editStockQuantity" type="number" min="0" required defaultValue={selectedProduct.variants[0]?.stockQuantity ?? 0} /></label><label>Precio<input name="editPrice" type="number" min="0.01" step="0.01" required defaultValue={selectedProduct.variants[0]?.currentPrice?.amount ?? ''} /></label></div><button type="submit">Guardar cambios</button></form> : null}</div></section>;
+}
+
+function OrderAdmin({ orders, onUpdateOrder }: { orders: Order[]; onUpdateOrder: (id: string, status: string, paymentStatus: string) => void }) {
+  return <section className="adminBlock"><h2>Pedidos</h2>{orders.length === 0 ? <p className="statusText">Todavia no hay pedidos.</p> : <div className="orderAdminList">{orders.map((order) => <article className="orderCard" key={order.id}><div><strong>{order.customer.firstName} {order.customer.lastName}</strong><p>{order.customer.email}</p><p>Total {formatPrice(order.total)}</p></div><div className="formRow"><select defaultValue={order.status} onChange={(event) => onUpdateOrder(order.id, event.target.value, order.paymentStatus)}><option value="PENDING">Pendiente</option><option value="CONFIRMED">Confirmado</option><option value="PREPARING">Preparando</option><option value="DELIVERED">Entregado</option><option value="CANCELLED">Cancelado</option></select><select defaultValue={order.paymentStatus} onChange={(event) => onUpdateOrder(order.id, order.status, event.target.value)}><option value="UNPAID">Sin pago</option><option value="PARTIALLY_PAID">Pago parcial</option><option value="PAID">Pagado</option><option value="REFUNDED">Reembolsado</option></select></div></article>)}</div>}</section>;
+}
+
+function UserAdmin({ users, onUpdateUser }: { users: AdminUser[]; onUpdateUser: (id: string, isActive: boolean, password?: string) => void }) {
+  return <section className="adminBlock"><h2>Clientes</h2>{users.length === 0 ? <p className="statusText">Todavia no hay clientes registrados.</p> : <div className="userGrid">{users.map((user) => <form className="adminForm userCard" key={user.id} onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); void onUpdateUser(user.id, form.get('isActive') === 'on', String(form.get('password') ?? '')); }}><strong>{user.firstName} {user.lastName}</strong><span>{user.email}</span><label className="checkboxLabel"><input name="isActive" type="checkbox" defaultChecked={user.isActive} />Usuario activo</label><label>Nueva contrasena opcional<input name="password" type="password" minLength={8} /></label><button type="submit">Guardar usuario</button></form>)}</div>}</section>;
+}
+*/
+
+type AdminPageProps = {
+  user: AuthUser | null;
+  navigate: (path: string) => void;
+  path: string;
+  products: CatalogProduct[];
+  categories: Category[];
+  deliveryMethods: DeliveryMethod[];
+  orders: Order[];
+  users: AdminUser[];
+  selectedProduct: CatalogProduct | null;
+  selectedProductId: string;
+  setSelectedProductId: (id: string) => void;
+  onCreateCategory: (event: FormEvent<HTMLFormElement>) => void;
+  onCreateProduct: (event: FormEvent<HTMLFormElement>) => void;
+  onUpdateProduct: (event: FormEvent<HTMLFormElement>) => void;
+  onUpdateOrder: (id: string, status: string, paymentStatus: string) => void;
+  onUpdateUser: (id: string, isActive: boolean, password?: string) => void;
+  onUpsertDeliveryMethod: (event: FormEvent<HTMLFormElement>) => void;
+  onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void;
+};
+
+function AdminPage(props: AdminPageProps) {
+  const currentPath = props.path === '/admin' ? '/admin/productos' : props.path;
+
+  if (!isAdmin(props.user)) {
+    return <section className="section"><p className="statusText errorText">Necesitas permisos de admin.</p><button className="primary" type="button" onClick={() => props.navigate('/login')}>Ingresar</button></section>;
+  }
+
+  return (
+    <section className="section adminPanel adminShell">
+      <aside className="adminSidebar">
+        <p className="eyebrow">Panel admin</p>
+        <h1>Gestion profesional.</h1>
+        <p>Productos, pedidos, clientes y configuracion separados para trabajar sin pantallas saturadas.</p>
+        <nav className="adminNav" aria-label="Administracion">
+          {[
+            ['/admin/productos', 'Productos'],
+            ['/admin/pedidos', 'Pedidos'],
+            ['/admin/usuarios', 'Usuarios'],
+            ['/admin/configuracion', 'Configuracion'],
+          ].map(([href, label]) => <button className={currentPath === href ? 'active' : ''} key={href} type="button" onClick={() => { props.setSelectedProductId(''); props.navigate(href); }}>{label}</button>)}
+        </nav>
+      </aside>
+      <div className="adminWorkspace">
+        {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} onRegisterPayment={props.onRegisterPayment} onUpdateOrder={props.onUpdateOrder} /> : null}
+        {currentPath === '/admin/usuarios' ? <UserAdminModern users={props.users} onUpdateUser={props.onUpdateUser} /> : null}
+        {currentPath === '/admin/configuracion' ? <SettingsAdmin deliveryMethods={props.deliveryMethods} onUpsertDeliveryMethod={props.onUpsertDeliveryMethod} /> : null}
+        {!['/admin/pedidos', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
+      </div>
+    </section>
+  );
+}
+
+function ProductAdminModern({ products, categories, selectedProduct, selectedProductId, setSelectedProductId, onCreateCategory, onCreateProduct, onUpdateProduct }: AdminPageProps) {
+  const [search, setSearch] = useState('');
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const totalStock = products.reduce((total, product) => total + (product.variants[0]?.availableStock ?? 0), 0);
+  const activeProducts = products.filter((product) => product.isActive).length;
+  const normalized = search.trim().toLowerCase();
+  const filteredProducts = normalized
+    ? products.filter((product) => [product.name, product.slug, product.description, product.line, product.category?.name, product.variants[0]?.sku].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalized)))
+    : products;
+
+  function openProduct(id: string) {
+    setSelectedProductId(id);
+  }
+
+  function closeProduct() {
+    setSelectedProductId('');
+  }
+
+  return (
+    <section className="adminPage">
+      <div className="adminPageHeader">
+        <div><p className="eyebrow">Productos</p><h2>Catalogo administrable.</h2><p>Visualiza el listado limpio y abre cada producto en modal para ver o editar detalles.</p></div>
+        <div className="adminStats"><span>{products.length} productos</span><span>{activeProducts} activos</span><span>{totalStock} disponibles</span></div>
+      </div>
+      <section className="adminCard productListCard">
+        <div className="cardHeader productToolbar"><div><h3>Todos los productos</h3><span>{filteredProducts.length} de {products.length} registros</span></div><button className="primary" type="button" onClick={() => setIsCreateOpen(true)}>Agregar nuevo producto</button></div>
+        <input className="searchInput adminSearch" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filtrar por nombre, SKU, categoria o linea" />
+        {products.length === 0 ? <p className="statusText">Todavia no hay productos cargados.</p> : null}
+        {products.length > 0 && filteredProducts.length === 0 ? <p className="statusText">No encontramos productos con ese filtro.</p> : null}
+        {filteredProducts.length > 0 ? <div className="adminTable">{filteredProducts.map((product) => {
+          const variant = product.variants[0];
+          return <button className="adminTableRow" key={product.id} type="button" onClick={() => openProduct(product.id)}><span><strong>{product.name}</strong><small>{product.category?.name ?? product.line ?? 'Sin categoria'}</small></span><span>{variant?.sku ?? 'Sin SKU'}</span><span>{variant?.currentPrice ? formatPrice(variant.currentPrice.amount) : 'Sin precio'}</span><span className={product.isActive ? 'pill ok' : 'pill muted'}>{product.isActive ? 'Activo' : 'Pausado'}</span><span>{variant?.availableStock ?? 0}/{variant?.stockQuantity ?? 0} u.</span></button>;
+        })}</div> : null}
+      </section>
+      {isCreateOpen ? <CreateProductModal categories={categories} onClose={() => setIsCreateOpen(false)} onCreateCategory={onCreateCategory} onCreateProduct={onCreateProduct} /> : null}
+      {selectedProduct ? <ProductModal product={selectedProduct} categories={categories} selectedProductId={selectedProductId} onClose={closeProduct} onUpdateProduct={onUpdateProduct} /> : null}
+    </section>
+  );
+}
+
+function CreateProductModal({ categories, onClose, onCreateCategory, onCreateProduct }: { categories: Category[]; onClose: () => void; onCreateCategory: (event: FormEvent<HTMLFormElement>) => void; onCreateProduct: (event: FormEvent<HTMLFormElement>) => void }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  return (
+    <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
+      <div aria-labelledby="createProductModalTitle" aria-modal="true" className="productModal createProductModal" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} role="dialog">
+        <div className="modalHeader"><div><p className="eyebrow">Nuevo producto</p><h3 id="createProductModalTitle">Cargar producto al catalogo</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
+        <div className="createModalGrid">
+          <form className="adminForm" onSubmit={onCreateProduct}><h3>Datos del producto</h3><label>Categoria<select name="categoryId" defaultValue=""><option value="">Sin categoria</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Nombre<input name="productName" required /></label><label>Slug opcional<input name="productSlug" /></label><label>Linea<input name="line" /></label><label>Descripcion<textarea name="description" rows={3} /></label><label>Imagen<input name="image" type="file" accept="image/jpeg,image/png,image/webp" /></label><div className="formRow"><label>SKU<input name="sku" required /></label><label>Variante<input name="variantName" required defaultValue="Unidad" /></label></div><div className="formRow"><label>Stock<input name="stockQuantity" type="number" min="0" required defaultValue="0" /></label><label>Precio<input name="price" type="number" min="0.01" step="0.01" required /></label></div><div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="submit">Publicar producto</button></div></form>
+          <form className="adminForm quickCategory" onSubmit={onCreateCategory}><h3>Categoria rapida</h3><p>Si falta una categoria, creala aca y despues seleccionala en el producto.</p><label>Nombre<input name="categoryName" required /></label><label>Slug opcional<input name="categorySlug" /></label><button type="submit">Crear categoria</button></form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProductModal({ product, categories, selectedProductId, onClose, onUpdateProduct }: { product: CatalogProduct; categories: Category[]; selectedProductId: string; onClose: () => void; onUpdateProduct: (event: FormEvent<HTMLFormElement>) => void }) {
+  const variant = product.variants[0];
+  const image = product.images[0];
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  return (
+    <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
+      <form aria-labelledby="productModalTitle" aria-modal="true" className="adminForm productModal" key={selectedProductId} onKeyDown={(event) => handleModalKeyDown(event, onClose)} onSubmit={onUpdateProduct} onMouseDown={(event) => event.stopPropagation()} role="dialog">
+        <div className="modalHeader"><div><p className="eyebrow">Detalle de producto</p><h3 id="productModalTitle">{product.name}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
+        <div className="modalBody">
+          <div className="modalPreview">{image ? <img src={imageSource(image.url)} alt={image.altText ?? product.name} /> : <span>Sin imagen</span>}<p>{product.description || 'Sin descripcion cargada.'}</p><div className="adminStats compact"><span>{variant?.currentPrice ? formatPrice(variant.currentPrice.amount) : 'Sin precio'}</span><span>{variant?.availableStock ?? 0} disponibles</span><span>{variant?.reservedQuantity ?? 0} reservados</span></div></div>
+          <div className="modalFields">
+            <input name="editProductId" type="hidden" value={product.id} />
+            <label>Categoria<select name="editCategoryId" defaultValue={product.category?.id ?? ''}><option value="">Sin categoria</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+            <label>Nombre<input name="editProductName" defaultValue={product.name} required /></label>
+            <label>Slug<input name="editProductSlug" defaultValue={product.slug} required /></label>
+            <label>Linea<input name="editLine" defaultValue={product.line ?? ''} /></label>
+            <label>Descripcion<textarea name="editDescription" defaultValue={product.description ?? ''} rows={4} /></label>
+            <label>Actualizar imagen<input name="editImage" type="file" accept="image/jpeg,image/png,image/webp" /></label>
+            <div className="formRow"><label>SKU<input name="editSku" defaultValue={variant?.sku ?? ''} required /></label><label>Variante<input name="editVariantName" defaultValue={variant?.name ?? 'Unidad'} required /></label></div>
+            <div className="formRow"><label>Stock<input name="editStockQuantity" type="number" min="0" defaultValue={variant?.stockQuantity ?? 0} required /></label><label>Precio<input name="editPrice" type="number" min="0.01" step="0.01" defaultValue={variant?.currentPrice?.amount ?? 0} required /></label></div>
+            <label className="checkboxLabel"><input name="editIsActive" type="checkbox" defaultChecked={product.isActive} />Producto activo</label>
+          </div>
+        </div>
+        <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="submit">Guardar cambios</button></div>
+      </form>
+    </div>
+  );
+}
+
+function OrderAdminModern({ orders, onUpdateOrder, onRegisterPayment }: { orders: Order[]; onUpdateOrder: (id: string, status: string, paymentStatus: string) => void; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void }) {
+  return <section className="adminPage"><div className="adminPageHeader"><div><p className="eyebrow">Pedidos</p><h2>Gestion de pedidos.</h2><p>Actualiza estado operativo y registra pagos manuales desde una vista dedicada.</p></div><div className="adminStats"><span>{orders.length} pedidos</span><span>{orders.filter((order) => order.status === 'PENDING').length} pendientes</span></div></div>{orders.length === 0 ? <p className="statusText">Todavia no hay pedidos.</p> : <div className="orderAdminList modernList">{orders.map((order) => <article className="orderCard modernOrder" key={order.id}><div><p className="eyebrow">Pedido {order.id.slice(0, 8)}</p><strong>{order.customer.firstName} {order.customer.lastName}</strong><p>{order.customer.email}</p><p>{order.items.length} items · Total {formatPrice(order.total)}</p><p>Entrega: {order.deliveryMethod?.name ?? 'Coordinar'} · {formatPrice(order.deliveryCost)}</p><p>Pagado: {formatPrice(order.payments.reduce((total, payment) => total + payment.amount, 0))}</p></div><div className="orderAdminActions"><div className="formRow"><select defaultValue={order.status} onChange={(event) => onUpdateOrder(order.id, event.target.value, order.paymentStatus)}><option value="PENDING">Pendiente</option><option value="CONFIRMED">Confirmado</option><option value="PREPARING">Preparando</option><option value="DELIVERED">Entregado</option><option value="CANCELLED">Cancelado</option></select><select defaultValue={order.paymentStatus} onChange={(event) => onUpdateOrder(order.id, order.status, event.target.value)}><option value="UNPAID">Sin pago</option><option value="PARTIALLY_PAID">Pago parcial</option><option value="PAID">Pagado</option><option value="REFUNDED">Reembolsado</option></select></div><form className="paymentForm" onSubmit={(event) => onRegisterPayment(order.id, event)}><input name="amount" type="number" min="0.01" step="0.01" placeholder="Monto" required /><input name="method" placeholder="Metodo" /><input name="notes" placeholder="Notas" /><button type="submit">Registrar pago</button></form></div></article>)}</div>}</section>;
+}
+
+function UserAdminModern({ users, onUpdateUser }: { users: AdminUser[]; onUpdateUser: (id: string, isActive: boolean, password?: string) => void }) {
+  return <section className="adminPage"><div className="adminPageHeader"><div><p className="eyebrow">Usuarios</p><h2>Gestion de clientes.</h2><p>Administra altas activas y cambio de contrasena cuando sea necesario.</p></div><div className="adminStats"><span>{users.length} usuarios</span><span>{users.filter((user) => user.isActive).length} activos</span></div></div>{users.length === 0 ? <p className="statusText">Todavia no hay clientes registrados.</p> : <div className="userGrid">{users.map((user) => <form className="adminForm userCard modernUser" key={user.id} onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); void onUpdateUser(user.id, form.get('isActive') === 'on', String(form.get('password') ?? '')); }}><div><strong>{user.firstName} {user.lastName}</strong><span>{user.email}</span></div><span className={user.isActive ? 'pill ok' : 'pill muted'}>{user.isActive ? 'Activo' : 'Inactivo'}</span><label className="checkboxLabel"><input name="isActive" type="checkbox" defaultChecked={user.isActive} />Usuario activo</label><label>Nueva contrasena opcional<input name="password" type="password" minLength={8} /></label><button type="submit">Guardar usuario</button></form>)}</div>}</section>;
+}
+
+function SettingsAdmin({ deliveryMethods, onUpsertDeliveryMethod }: { deliveryMethods: DeliveryMethod[]; onUpsertDeliveryMethod: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <section className="adminPage"><div className="adminPageHeader"><div><p className="eyebrow">Configuracion</p><h2>Metodos de entrega.</h2><p>Centraliza costos y disponibilidad para que el checkout calcule el total real.</p></div></div><div className="settingsGrid"><form className="adminForm adminCard" onSubmit={onUpsertDeliveryMethod}><h3>Nuevo metodo de entrega</h3><input name="deliveryMethodId" type="hidden" /><label>Nombre<input name="deliveryName" required /></label><label>Descripcion<input name="deliveryDescription" /></label><label>Costo<input name="deliveryCost" type="number" min="0" step="0.01" required /></label><label className="checkboxLabel"><input name="deliveryRequiresAddress" type="checkbox" defaultChecked />Requiere direccion</label><label className="checkboxLabel"><input name="deliveryIsActive" type="checkbox" defaultChecked />Activo</label><button type="submit">Crear metodo</button></form><section className="adminCard"><h3>Metodos cargados</h3>{deliveryMethods.length === 0 ? <p className="statusText">Todavia no hay metodos de entrega.</p> : <div className="settingsList">{deliveryMethods.map((method) => <form className="deliveryMethodItem" key={method.id} onSubmit={onUpsertDeliveryMethod}><input name="deliveryMethodId" type="hidden" value={method.id} /><input name="deliveryName" defaultValue={method.name} required /><input name="deliveryDescription" defaultValue={method.description ?? ''} /><input name="deliveryCost" type="number" min="0" step="0.01" defaultValue={method.cost} required /><label className="checkboxLabel"><input name="deliveryRequiresAddress" type="checkbox" defaultChecked={method.requiresAddress} />Direccion</label><label className="checkboxLabel"><input name="deliveryIsActive" type="checkbox" defaultChecked={method.isActive} />Activo</label><button type="submit">Guardar</button></form>)}</div>}</section></div></section>;
+}
+
+function OrderList({ orders }: { orders: Order[] }) {
+  return <div className="orderList">{orders.map((order) => <article className="orderCard" key={order.id}><div className="orderHeader"><strong>Pedido {order.id.slice(0, 8)}</strong><span>{order.status} · {order.paymentStatus}</span></div>{order.items.map((item) => <p key={item.id}>{item.quantity} x {item.productName} ({formatPrice(item.lineTotal)})</p>)}<strong>Total {formatPrice(order.total)}</strong></article>)}</div>;
+}

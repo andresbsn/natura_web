@@ -1,0 +1,66 @@
+﻿framework:
+  name: AB AI Development Framework
+  version: 1.0.2
+
+project:
+  name: natura
+  status: new   # new | existing
+  description: "Ecommerce responsive para una revendedora de Natura, con catalogo publico, usuarios registrados para pedidos y panel admin para productos, precios, stock, promociones, pedidos, pagos manuales y reportes."
+
+stack:
+  frontend:
+    framework: "React + Vite"
+    language: "TypeScript"
+  backend:
+    framework: "Node.js + Express"
+    language: "TypeScript"
+  database:
+    engine: "PostgreSQL"
+    orm: "Prisma"
+
+infrastructure:
+  docker: true
+  reverse_proxy: "Nginx"
+  hosting: "VPS contratado"
+
+environments:
+  development: true
+  testing: true
+  production: true
+
+rules:
+  preserve_existing_architecture: true
+  refactor_only_when_requested: true
+  require_migrations_for_schema_changes: true
+  production_requires_approval: true
+  agent_commits: false
+
+quality_gates:
+  frontend:
+    - lint
+    - test
+    - build
+  backend:
+    - lint
+    - test
+    - build
+  global:
+    - git_diff_review
+
+workflow:
+  default_agent: ab-orchestrator
+  require_task_record_for_medium_or_higher: true
+  require_reviewer_for_medium_or_higher: true
+  require_human_approval_for_critical: true
+
+git:
+  auto_commit: false
+  require_diff_review: true
+  allow_force_push: false
+
+project_readiness:
+  discovery_complete: true
+  architecture_verified: true
+  business_rules_verified: true
+  commands_verified: true
+  quality_gates_verified: true
