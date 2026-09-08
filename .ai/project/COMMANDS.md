@@ -31,6 +31,7 @@ El proyecto usa npm workspaces con `apps/api` y `apps/web`.
 - direct workspace generate: `npm run prisma:generate -w apps/api`
 - direct workspace migrate: `npm run prisma:migrate -w apps/api`
 - Docker migrate against `postgres.ecom_natura`: `docker compose run --rm api npm run prisma:migrate -w apps/api`
+- production migration deploy: `docker compose -f docker-compose.prod.yml run --rm api npm run prisma:migrate:deploy -w apps/api`
 
 ## Docker / services
 - start/rebuild: `docker compose up --build`
@@ -49,4 +50,6 @@ El proyecto usa npm workspaces con `apps/api` y `apps/web`.
 - Admin catalog: `GET|POST /api/admin/categories`, `PATCH /api/admin/categories/:id`, `GET|POST /api/admin/products`, `PATCH /api/admin/products/:id`.
 
 ## Deployment
-- Pendiente. Produccion en VPS con Docker/Nginx requiere checklist y aprobacion humana antes de acciones destructivas o cambios productivos.
+- VPS production build/start: `docker compose -f docker-compose.prod.yml up -d --build`
+- VPS production status: `docker compose -f docker-compose.prod.yml ps`
+- Produccion en VPS requiere `.env` creado manualmente fuera de git, backup previo antes de migraciones con datos reales y aprobacion humana antes de acciones destructivas o cambios productivos.

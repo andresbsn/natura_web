@@ -6,6 +6,8 @@ Record only verified durable business rules. Do not use this file for temporary 
 - El proyecto es para una revendedora de Natura, no una tienda oficial.
 - El catalogo publico puede ser navegado por visitantes sin cuenta.
 - Para crear un pedido, el usuario debe estar registrado e iniciar sesion.
+- Para completar el registro e iniciar sesion, el cliente debe validar su email mediante enlace enviado por correo.
+- Las contrasenas de clientes deben tener al menos 8 caracteres.
 - El carrito puede comenzar como anonimo/local y debe asociarse al usuario al iniciar sesion o durante checkout.
 - No se integra pasarela de pagos en el MVP.
 - Los pagos se registran manualmente desde el panel admin.

@@ -15,6 +15,7 @@ const envSchema = z.object({
   API_PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
+  WEB_URL: z.string().url().default('http://localhost:5173'),
   JWT_ACCESS_SECRET: z.string().min(16).default('development_access_secret_change_me'),
   JWT_REFRESH_SECRET: z.string().min(16).default('development_refresh_secret_change_me'),
   SMTP_HOST: z.string().optional(),
@@ -22,6 +23,17 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
   SMTP_FROM: z.string().optional(),
+}).superRefine((data, ctx) => {
+  const webUrl = new URL(data.WEB_URL);
+  const isLocalWebUrl = webUrl.hostname === 'localhost' || webUrl.hostname === '127.0.0.1';
+
+  if (data.NODE_ENV === 'production' && isLocalWebUrl) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'WEB_URL must be the public frontend URL in production, not localhost.',
+      path: ['WEB_URL'],
+    });
+  }
 });
 
 export const env = envSchema.parse(process.env);

@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 
+import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
 import { verifyAccessToken } from './auth.tokens.js';
 
@@ -32,4 +33,29 @@ export function requireRole(...roles: string[]) {
 
     return next();
   };
+}
+
+export async function requireVerifiedActiveUser(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user) {
+    return next(new AppError(401, 'Authentication required', 'AUTH_REQUIRED'));
+  }
+
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id: true, isActive: true, emailVerifiedAt: true },
+    });
+
+    if (!user || !user.isActive) {
+      return next(new AppError(404, 'User not found', 'USER_NOT_FOUND'));
+    }
+
+    if (!user.emailVerifiedAt) {
+      return next(new AppError(403, 'Email verification required', 'EMAIL_VERIFICATION_REQUIRED'));
+    }
+
+    return next();
+  } catch (error) {
+    return next(error);
+  }
 }

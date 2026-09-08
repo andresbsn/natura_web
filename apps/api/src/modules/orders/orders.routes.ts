@@ -4,12 +4,14 @@ import { z } from 'zod';
 
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
-import { requireAuth } from '../auth/auth.middleware.js';
+import { requireAuth, requireVerifiedActiveUser } from '../auth/auth.middleware.js';
 import { mapOrder, orderInclude } from './order.mappers.js';
+import { RESERVED_ORDER_STATUSES, recalculateOrderItems } from './order-stock.js';
 
 export const ordersRouter = Router();
 
 ordersRouter.use(requireAuth);
+ordersRouter.use(requireVerifiedActiveUser);
 
 const orderItemSchema = z.object({
   variantId: z.string().uuid(),
@@ -47,21 +49,31 @@ ordersRouter.post('/', async (req, res, next) => {
         throw new AppError(404, 'User not found', 'USER_NOT_FOUND');
       }
 
-      const variantIds = data.items.map((item) => item.variantId);
+      if (!customer.emailVerifiedAt) {
+        throw new AppError(403, 'Email verification required', 'EMAIL_VERIFICATION_REQUIRED');
+      }
+
+      const variantIds = [...new Set(data.items.map((item) => item.variantId))];
+      const requestedByVariantId = data.items.reduce((totals, item) => {
+        totals.set(item.variantId, (totals.get(item.variantId) ?? 0) + item.quantity);
+        return totals;
+      }, new Map<string, number>());
+
+      await tx.$queryRaw`SELECT id FROM "ProductVariant" WHERE id IN (${Prisma.join(variantIds)}) FOR UPDATE`;
       const variants = await tx.productVariant.findMany({
         where: { id: { in: variantIds }, isActive: true, product: { isActive: true } },
         include: {
-          product: true,
-          prices: { orderBy: { createdAt: 'desc' }, take: 1 },
+          product: { include: { category: { include: { promotions: true } }, promotions: true } },
+          prices: { orderBy: { createdAt: 'desc' }, take: 1, include: { catalog: { include: { promotions: true } } } },
+          promotions: true,
         },
       });
       const variantsById = new Map(variants.map((variant) => [variant.id, variant]));
-      const reservations = await tx.stockMovement.groupBy({
+      const reservations = await tx.orderItem.groupBy({
         by: ['variantId'],
         where: {
           variantId: { in: variantIds },
-          type: 'ORDER_RESERVED',
-          order: { status: { in: ['PENDING', 'CONFIRMED', 'PREPARING'] } },
+          order: { status: { in: RESERVED_ORDER_STATUSES } },
         },
         _sum: { quantity: true },
       });
@@ -84,11 +96,12 @@ ordersRouter.post('/', async (req, res, next) => {
 
         const availableStock = variant.stockQuantity - (reservedByVariantId.get(variant.id) ?? 0);
 
-        if (availableStock < item.quantity) {
+        if (availableStock < (requestedByVariantId.get(variant.id) ?? item.quantity)) {
           throw new AppError(409, `Stock insuficiente para ${variant.product.name}`, 'INSUFFICIENT_STOCK');
         }
 
-        const unitPrice = price.amount;
+        const promotion = recalculateOrderItems([{ variantId: variant.id, quantity: item.quantity }], [variant]).items[0];
+        const unitPrice = promotion.unitPrice;
         const lineTotal = unitPrice.mul(item.quantity);
 
         return {
@@ -97,11 +110,13 @@ ordersRouter.post('/', async (req, res, next) => {
           variantNameSnapshot: variant.name,
           skuSnapshot: variant.sku,
           unitPrice,
+          discountAmount: promotion.discountAmount,
           quantity: item.quantity,
           lineTotal,
         };
       });
       const subtotal = orderItems.reduce((total, item) => total.add(item.lineTotal), new Prisma.Decimal(0));
+      const discountTotal = orderItems.reduce((total, item) => total.add(item.discountAmount.mul(item.quantity)), new Prisma.Decimal(0));
       const deliveryCost = deliveryMethod?.cost ?? new Prisma.Decimal(0);
       const total = subtotal.add(deliveryCost);
 
@@ -116,6 +131,7 @@ ordersRouter.post('/', async (req, res, next) => {
           deliveryAddress: data.deliveryAddress,
           deliveryNotes: data.deliveryNotes,
           subtotal,
+          discountTotal,
           deliveryCost,
           total,
           items: { create: orderItems },

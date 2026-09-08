@@ -286,6 +286,9 @@ button:disabled {
   border: 1px solid rgba(49, 93, 58, 0.12);
   border-radius: 1.5rem;
   box-shadow: 0 14px 40px rgba(43, 62, 38, 0.08);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   overflow: hidden;
 }
 
@@ -307,9 +310,28 @@ button:disabled {
 }
 
 .productInfo {
-  display: grid;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   gap: 0.65rem;
   padding: 1rem;
+}
+
+.productInfo button {
+  margin-top: auto;
+}
+
+.authSection {
+  display: grid;
+  justify-items: center;
+  min-height: calc(100vh - 12rem);
+  place-content: center;
+  text-align: center;
+}
+
+.authSection .compactForm {
+  text-align: left;
+  width: min(100%, 34rem);
 }
 
 .productInfo h3,
@@ -318,6 +340,13 @@ button:disabled {
 .productInfo strong {
   color: #315d3a;
   font-size: 1.35rem;
+}
+
+.promoBadge {
+  background: rgba(164, 93, 45, 0.12);
+  border-radius: 999px;
+  color: #8d3f26 !important;
+  padding: 0.35rem 0.55rem;
 }
 
 .productMeta {
@@ -334,6 +363,10 @@ button:disabled {
 .cartItem input,
 .paymentForm input,
 .deliveryMethodItem input,
+.itemEditActions input,
+.addItemForm input,
+.addItemForm select,
+.orderFilters select,
 .orderCard select {
   background: #fff;
   border: 1px solid rgba(49, 93, 58, 0.22);
@@ -347,18 +380,60 @@ button:disabled {
   margin-bottom: 1.5rem;
 }
 
-.statusText,
-.toast {
+.statusText {
   padding: 1rem;
 }
 
-.toast {
-  border-radius: 999px;
-  left: 50%;
+.appAlertBackdrop {
+  align-items: center;
+  background: transparent;
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+  pointer-events: none;
   position: fixed;
   top: 5.5rem;
-  transform: translateX(-50%);
-  z-index: 20;
+  width: 100%;
+  z-index: 100;
+}
+
+.appAlert {
+  align-items: center;
+  background: #fff;
+  border: 1px solid rgba(49, 93, 58, 0.24);
+  border-radius: 1.25rem;
+  box-shadow: 0 1.25rem 3rem rgba(38, 50, 39, 0.18);
+  color: #315d3a;
+  display: flex;
+  gap: 1rem;
+  font-weight: 800;
+  justify-content: space-between;
+  max-width: min(24rem, calc(100vw - 2rem));
+  padding: 1rem 1.25rem;
+  pointer-events: auto;
+  text-align: center;
+  width: min(24rem, calc(100vw - 2rem));
+}
+
+.appAlertError {
+  border-color: rgba(164, 93, 45, 0.35);
+  color: #8d3f26;
+}
+
+.appAlertSuccess {
+  border-color: rgba(49, 93, 58, 0.24);
+  color: #315d3a;
+}
+
+.appAlertClose {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.35rem;
+  font-weight: 900;
+  line-height: 1;
+  padding: 0.1rem;
 }
 
 .errorText {
@@ -386,6 +461,38 @@ button:disabled {
   font-size: 0.88rem;
   font-weight: 800;
   gap: 0.4rem;
+}
+
+.passwordInputGroup {
+  position: relative;
+}
+
+.passwordInputGroup input {
+  padding-right: 3.1rem;
+}
+
+.adminForm .passwordToggleButton {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #315d3a;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 1rem;
+  height: 100%;
+  justify-content: center;
+  padding: 0 0.85rem;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
+.passwordMismatchText {
+  color: #8d3f26;
+}
+
+.passwordMatchText {
+  color: #315d3a;
 }
 
 .formRow {
@@ -562,6 +669,11 @@ button:disabled {
   color: #8d3f26;
 }
 
+.pill.warning {
+  background: rgba(194, 128, 69, 0.16);
+  color: #8d5a22;
+}
+
 .adminContentGrid,
 .settingsGrid {
   display: grid;
@@ -634,6 +746,14 @@ button:disabled {
   min-width: 44rem;
   padding: 0.9rem 1rem;
   text-align: left;
+}
+
+.promotionTableRow {
+  grid-template-columns: minmax(14rem, 1.5fr) minmax(7rem, 0.65fr) minmax(8rem, 0.8fr) auto minmax(7rem, 0.65fr);
+}
+
+.orderTableRow {
+  grid-template-columns: minmax(14rem, 1.5fr) minmax(5rem, 0.45fr) minmax(7rem, 0.65fr) auto auto minmax(8rem, 0.7fr);
 }
 
 .adminTableRow:hover {
@@ -782,6 +902,160 @@ button:disabled {
   gap: 0.75rem;
 }
 
+.orderFilters {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) minmax(10rem, 0.32fr) minmax(10rem, 0.32fr);
+}
+
+.orderFilters .searchInput {
+  margin-bottom: 0;
+}
+
+.orderModal {
+  max-width: 1080px;
+}
+
+.orderModalSummary,
+.orderModalGrid,
+.orderItemsPreview {
+  display: grid;
+  gap: 1rem;
+}
+
+.orderModalSummary {
+  grid-template-columns: repeat(3, 1fr);
+  margin: 1rem 0;
+}
+
+.orderModalSummary article,
+.orderItemRow,
+.orderStatusPanel,
+.orderEditForm {
+  background: #f7f1e8;
+  border: 1px solid rgba(49, 93, 58, 0.1);
+  border-radius: 1.2rem;
+  padding: 1rem;
+}
+
+.orderModalSummary span,
+.orderItemsPreview small {
+  color: #a45d2d;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.orderModalSummary strong,
+.orderItemsPreview strong {
+  color: #315d3a;
+  display: block;
+}
+
+.orderModalSummary small,
+.orderItemsPreview span {
+  color: #52624d;
+}
+
+.orderModalGrid {
+  grid-template-columns: minmax(0, 1.1fr) minmax(18rem, 0.75fr);
+}
+
+.orderEditForm {
+  grid-column: 1 / -1;
+}
+
+.orderItemsPreview {
+  margin-top: 0.25rem;
+}
+
+.orderItemRow {
+  align-items: center;
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.itemEditActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.itemEditActions input {
+  max-width: 5.5rem;
+}
+
+.itemEditActions button,
+.addItemPanel button,
+.addItemForm button {
+  border: 0;
+  border-radius: 999px;
+  font-weight: 900;
+  padding: 0.72rem 0.9rem;
+}
+
+.compactButton {
+  justify-self: start;
+  padding: 0.68rem 0.95rem !important;
+  width: auto !important;
+}
+
+.iconActionButton {
+  align-items: center;
+  background: #e8dccd;
+  border: 0;
+  border-radius: 999px;
+  color: #315d3a;
+  display: inline-flex;
+  height: 2.35rem;
+  justify-content: center;
+  padding: 0 !important;
+  width: 2.35rem;
+}
+
+.iconActionButton svg {
+  fill: currentColor;
+  height: 1rem;
+  width: 1rem;
+}
+
+.itemEditActions button:not(.secondaryButton):not(.iconActionButton),
+.addItemForm button:not(.secondaryButton) {
+  background: #315d3a;
+  color: #fffaf2;
+}
+
+.dangerButton {
+  background: rgba(164, 93, 45, 0.14) !important;
+  color: #8d3f26 !important;
+}
+
+.paymentForm {
+  align-self: start;
+}
+
+.addItemPanel {
+  border-top: 1px solid rgba(49, 93, 58, 0.12);
+  margin-top: 0.25rem;
+  padding-top: 1rem;
+}
+
+.addItemForm {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.addItemForm label {
+  color: #315d3a;
+  display: grid;
+  font-size: 0.88rem;
+  font-weight: 800;
+  gap: 0.4rem;
+}
+
 .deliveryMethodItem {
   background: #fff;
   border: 1px solid rgba(49, 93, 58, 0.1);
@@ -850,6 +1124,9 @@ button:disabled {
   .settingsGrid,
   .modalBody,
   .createModalGrid,
+  .orderFilters,
+  .orderModalSummary,
+  .orderModalGrid,
   .modernOrder,
   .cartLayout,
   .formRow,
@@ -877,6 +1154,23 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .promotionTableRow {
+    grid-template-columns: 1fr;
+  }
+
+  .orderTableRow {
+    grid-template-columns: 1fr;
+  }
+
+  .orderItemRow {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .itemEditActions {
+    justify-content: flex-start;
+  }
+
   .productToolbar button {
     width: 100%;
   }
@@ -892,10 +1186,7 @@ button:disabled {
     flex-direction: column;
   }
 
-  .toast {
-    border-radius: 1rem;
-    left: 1rem;
-    right: 1rem;
-    transform: none;
+  .appAlert {
+    width: auto;
   }
 }

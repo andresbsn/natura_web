@@ -1,25 +1,29 @@
-# ADR-006: Admin Module UI Pattern
+# ADR-006: Patron de UI para modulos admin tipo ABM
 
-## Status
-Accepted
+## Estado
+Aceptada
 
-## Context
-El panel admin necesita crecer con modulos como productos, pedidos, usuarios, configuracion, promociones y reportes. La primera version mezclaba formularios, listados y edicion en la misma pantalla, lo que hacia la interfaz saturada y poco profesional.
+## Contexto
+El panel admin debe permitir administrar productos, pedidos, usuarios, promociones y configuracion sin pantallas saturadas. Los modulos activos ya evolucionaron hacia paginas separadas con listados filtrables y formularios de alta/edicion en modales.
 
 ## Decision
-Cada modulo admin debe usar una estructura consistente:
+Los ABM del panel admin deben seguir este patron:
 
-- Una pagina dedicada por modulo dentro de `/admin/*`.
-- Una seccion principal por pagina, con titulo claro del modulo.
-- Listado principal filtrable o buscable cuando aplique.
-- Acciones primarias en la parte superior de la seccion, por ejemplo `Agregar nuevo producto`.
-- Alta, detalle y edicion en modal, no incrustados junto al listado.
-- Evitar multiples cards/formularios permanentes compitiendo en la misma pagina.
-- Diseno responsive, sin superposicion de textos, tablas o tarjetas.
-- Modales con accesibilidad basica: `role="dialog"`, `aria-modal`, foco inicial, cierre con `Escape` y contencion de foco.
+- Una pagina/ruta por modulo dentro de `/admin`.
+- Encabezado con `eyebrow`, titulo, descripcion breve y metricas/resumen cuando aplique.
+- Seccion principal con tarjeta `adminCard`, toolbar, contador de registros y busqueda/filtros.
+- Listado en filas accionables (`adminTableRow`) que abren un modal de detalle/edicion.
+- Altas solo cuando exista endpoint/caso de uso confirmado; la accion primaria abre un modal `Nuevo ...`.
+- Edicion de registros existentes siempre en modal, con cierre por boton, backdrop y tecla Escape, preservando foco inicial en el boton de cierre.
+- Estados vacios y filtros sin resultados deben mostrar `statusText` claro.
+- Mantener estilos y clases existentes (`adminPage`, `productListCard`, `productToolbar`, `modalBackdrop`, `productModal`, `modalFields`, `modalActions`) salvo que el modulo requiera una extension pequena.
 
-## Consequences
-- Nuevos modulos admin deben replicar este esquema antes de agregar variantes visuales.
-- Pedidos y usuarios deben evolucionar hacia el mismo patron usado por productos: listado central, filtros y acciones en modales cuando haya detalle o edicion compleja.
-- La configuracion debe dividirse en secciones claras solo cuando haya grupos de datos realmente distintos.
-- Si una pantalla necesita mas de una seccion permanente, debe justificarse por flujo de trabajo, no por conveniencia tecnica.
+## Aplicacion actual
+- Productos: listado filtrable + modal de nuevo producto + modal de detalle/edicion.
+- Pedidos: listado filtrable + modal de detalle/edicion/pagos/items.
+- Promociones: listado filtrable + modal de nueva promocion + modal de detalle/edicion.
+- Usuarios: listado filtrable + modal de detalle/edicion de usuario existente. No incluye alta admin porque no hay endpoint frontend confirmado para crear usuarios desde admin.
+- Configuracion / metodos de entrega: listado filtrable + modal de nuevo metodo + modal de detalle/edicion.
+
+## Consecuencias
+Los futuros ABM admin deben priorizar consistencia, carga rapida y lectura de listado. Los formularios inline extensos quedan reservados para casos excepcionales documentados.

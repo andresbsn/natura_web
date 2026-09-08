@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 
+import { applyBestPromotion } from '../promotions/promotion-calculator.js';
 import { productInclude } from './product.queries.js';
 
 type ProductWithRelations = Prisma.ProductGetPayload<{ include: typeof productInclude }>;
@@ -23,6 +24,26 @@ function mapPrice(price: PriceWithCatalog) {
           isActive: price.catalog.isActive,
         }
       : null,
+  };
+}
+
+function mapCurrentPrice(variant: ProductWithRelations['variants'][number], product: ProductWithRelations) {
+  const price = variant.prices[0];
+  if (!price) return null;
+
+  const promotion = applyBestPromotion(price.amount, [
+    ...variant.promotions,
+    ...product.promotions,
+    ...(product.category?.promotions ?? []),
+    ...(price.catalog?.promotions ?? []),
+  ]);
+
+  return {
+    ...mapPrice(price),
+    amount: promotion ? decimalToNumber(promotion.finalPrice) : decimalToNumber(price.amount),
+    originalAmount: decimalToNumber(price.amount),
+    discountAmount: promotion ? decimalToNumber(promotion.discountAmount) : 0,
+    promotion: promotion ? { id: promotion.id, name: promotion.name, discountType: promotion.discountType } : null,
   };
 }
 
@@ -53,7 +74,7 @@ export function mapProduct(product: ProductWithRelations) {
       sortOrder: image.sortOrder,
     })),
     variants: product.variants.map((variant) => {
-      const reservedQuantity = variant.stockMovements.reduce((total, movement) => total + movement.quantity, 0);
+      const reservedQuantity = variant.orderItems.reduce((total, item) => total + item.quantity, 0);
 
       return {
         id: variant.id,
@@ -65,7 +86,7 @@ export function mapProduct(product: ProductWithRelations) {
         reservedQuantity,
         isActive: variant.isActive,
         prices: variant.prices.map(mapPrice),
-        currentPrice: variant.prices[0] ? mapPrice(variant.prices[0]) : null,
+        currentPrice: mapCurrentPrice(variant, product),
       };
     }),
     createdAt: product.createdAt,

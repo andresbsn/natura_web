@@ -7,7 +7,6 @@ coverage
 .git
 .env
 .env.*
-!.env.example
 *.log
 uploads
 .ai/tasks

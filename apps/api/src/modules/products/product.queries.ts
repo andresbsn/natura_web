@@ -1,9 +1,13 @@
 import { Prisma } from '@prisma/client';
 
 import { prisma } from '../../db/prisma.js';
+import { RESERVED_ORDER_STATUSES } from '../orders/order-stock.js';
 
 export const productInclude = Prisma.validator<Prisma.ProductInclude>()({
-  category: true,
+  category: {
+    include: { promotions: true },
+  },
+  promotions: true,
   images: {
     orderBy: { sortOrder: 'asc' },
   },
@@ -12,12 +16,12 @@ export const productInclude = Prisma.validator<Prisma.ProductInclude>()({
     include: {
       prices: {
         orderBy: { createdAt: 'desc' },
-        include: { catalog: true },
+        include: { catalog: { include: { promotions: true } } },
       },
-      stockMovements: {
+      promotions: true,
+      orderItems: {
         where: {
-          type: 'ORDER_RESERVED',
-          order: { status: { in: ['PENDING', 'CONFIRMED', 'PREPARING'] } },
+          order: { status: { in: RESERVED_ORDER_STATUSES } },
         },
       },
     },
