@@ -50,6 +50,20 @@ enum DiscountType {
   FIXED_PRICE
 }
 
+enum CustomerAccountMovementType {
+  ORDER_CHARGE
+  ORDER_CANCEL_CREDIT
+  PAYMENT_CREDIT
+  PAYMENT_REFUND_DEBIT
+  MANUAL_DEBIT_ADJUSTMENT
+  MANUAL_CREDIT_ADJUSTMENT
+}
+
+enum CustomerAccountMovementDirection {
+  DEBIT
+  CREDIT
+}
+
 model User {
   id              String    @id @default(uuid())
   email           String    @unique
@@ -70,6 +84,9 @@ model User {
   refreshTokens      RefreshToken[]
   emailTokens        EmailVerificationToken[]
   stockMovements     StockMovement[]     @relation("StockMovementActor")
+  customerAccount    CustomerAccount?
+  customerMovements  CustomerAccountMovement[] @relation("CustomerAccountMovementCustomer")
+  accountActions     CustomerAccountMovement[] @relation("CustomerAccountMovementActor")
 }
 
 model EmailVerificationToken {
@@ -268,6 +285,7 @@ model Order {
   items          OrderItem[]
   payments       Payment[]
   stockMovements StockMovement[]
+  accountMovements CustomerAccountMovement[]
 }
 
 model OrderItem {
@@ -301,6 +319,56 @@ model Payment {
 
   order        Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
   registeredBy User  @relation("PaymentRegisteredBy", fields: [registeredById], references: [id], onDelete: Restrict)
+  accountMovements CustomerAccountMovement[]
+}
+
+model CustomerAccount {
+  id             String   @id @default(uuid())
+  customerId     String   @unique
+  currentBalance Decimal  @default(0) @db.Decimal(12, 2)
+  currency       String   @default("ARS")
+  lastMovementAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  customer  User                      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  movements CustomerAccountMovement[]
+
+  @@index([currentBalance])
+  @@index([lastMovementAt])
+}
+
+model CustomerAccountMovement {
+  id                String                           @id @default(uuid())
+  customerAccountId String
+  customerId        String
+  orderId           String?
+  paymentId         String?
+  actorId           String?
+  type              CustomerAccountMovementType
+  direction         CustomerAccountMovementDirection
+  amount            Decimal                          @db.Decimal(12, 2)
+  balanceAfter      Decimal                          @db.Decimal(12, 2)
+  description       String?
+  idempotencyKey    String                           @unique
+  documentNumber    String?
+  documentUrl       String?
+  metadata          Json?
+  occurredAt        DateTime                         @default(now())
+  createdAt         DateTime                         @default(now())
+
+  account  CustomerAccount @relation(fields: [customerAccountId], references: [id], onDelete: Restrict)
+  customer User            @relation("CustomerAccountMovementCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  order    Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  payment  Payment?        @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  actor    User?           @relation("CustomerAccountMovementActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([customerAccountId, occurredAt])
+  @@index([customerId, occurredAt])
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([actorId])
+  @@index([type])
 }
 
 model StockMovement {

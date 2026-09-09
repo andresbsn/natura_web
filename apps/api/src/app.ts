@@ -8,7 +8,9 @@ import path from 'node:path';
 
 import { env } from './config/env.js';
 import { errorHandler, notFoundHandler } from './http/errors.js';
+import { adminAccountsRouter } from './modules/admin/admin.accounts.routes.js';
 import { adminOrdersRouter } from './modules/admin/admin.orders.routes.js';
+import { accountsRouter } from './modules/accounts/accounts.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { adminProductsRouter } from './modules/admin/admin.products.routes.js';
 import { adminPromotionsRouter } from './modules/admin/admin.promotions.routes.js';
@@ -51,6 +53,8 @@ export function createApp() {
 
   app.use('/api', healthRouter);
   app.use('/api/auth', authRouter);
+  app.use('/api/account', accountsRouter);
+  app.use('/api/admin', adminAccountsRouter);
   app.use('/api/admin', adminProductsRouter);
   app.use('/api/admin', adminOrdersRouter);
   app.use('/api/admin', adminPromotionsRouter);

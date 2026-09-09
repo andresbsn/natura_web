@@ -1,9 +1,10 @@
-import { OrderStatus, PaymentStatus, Prisma } from '@prisma/client';
+import { CustomerAccountMovementType, OrderStatus, PaymentStatus, Prisma } from '@prisma/client';
 import { Router } from 'express';
 import { z } from 'zod';
 
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
+import { createLedgerMovement } from '../accounts/account-ledger.js';
 import { requireAuth, requireRole } from '../auth/auth.middleware.js';
 import { sendOrderStatusEmail } from '../notifications/order-email-notifications.js';
 import { mapOrder, orderInclude } from '../orders/order.mappers.js';
@@ -118,23 +119,31 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const data = orderUpdateSchema.parse(req.body);
-    const existing = await prisma.order.findUnique({ where: { id }, include: orderInclude });
-
-    if (!existing) {
-      throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
-    }
-
-    assertAdminOrderStatusTransition(existing.status, data.status);
-
-    if (data.items && !RESERVED_ORDER_STATUSES.includes(existing.status)) {
-      throw new AppError(409, 'Only active reserved orders can be edited', 'ORDER_NOT_EDITABLE');
-    }
-
-    if (data.items && data.status && data.status !== existing.status) {
-      throw new AppError(409, 'Edit order items before changing operational status', 'ORDER_EDIT_STATUS_CONFLICT');
-    }
+    let previousStatus: OrderStatus | null = null;
 
     const order = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${id} FOR UPDATE`;
+      const existing = await tx.order.findUnique({ where: { id }, include: orderInclude });
+
+      if (!existing) {
+        throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+      }
+
+      previousStatus = existing.status;
+      assertAdminOrderStatusTransition(existing.status, data.status);
+
+      if (data.items && !RESERVED_ORDER_STATUSES.includes(existing.status)) {
+        throw new AppError(409, 'Only active reserved orders can be edited', 'ORDER_NOT_EDITABLE');
+      }
+
+      if ((existing.status === 'CANCELLED' || existing.status === 'DELIVERED') && (data.items !== undefined || data.deliveryMethodId !== undefined)) {
+        throw new AppError(409, 'Closed orders cannot change totals', 'ORDER_TOTAL_LOCKED');
+      }
+
+      if (data.items && data.status && data.status !== existing.status) {
+        throw new AppError(409, 'Edit order items before changing operational status', 'ORDER_EDIT_STATUS_CONFLICT');
+      }
+
       const stockAction = orderStockAction(existing.status, data.status);
       const nextDeliveryMethod = data.deliveryMethodId
         ? await tx.deliveryMethod.findFirst({ where: { id: data.deliveryMethodId, isActive: true } })
@@ -237,6 +246,33 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
         include: orderInclude,
       });
 
+      if (updated.status === 'CANCELLED' && existing.status !== 'CANCELLED') {
+        await createLedgerMovement(tx, {
+          customerId: existing.customerId,
+          orderId: id,
+          actorId: req.user!.id,
+          type: CustomerAccountMovementType.ORDER_CANCEL_CREDIT,
+          direction: 'CREDIT',
+          amount: existing.total,
+          description: `Credito por cancelacion admin del pedido ${id.slice(0, 8)}`,
+          idempotencyKey: `order:${id}:cancel-credit`,
+          metadata: auditJson({ source: 'admin_cancel', previousStatus: existing.status }),
+        });
+      } else if (!updated.total.equals(existing.total)) {
+        const isDebit = updated.total.greaterThan(existing.total);
+        await createLedgerMovement(tx, {
+          customerId: existing.customerId,
+          orderId: id,
+          actorId: req.user!.id,
+          type: isDebit ? CustomerAccountMovementType.MANUAL_DEBIT_ADJUSTMENT : CustomerAccountMovementType.MANUAL_CREDIT_ADJUSTMENT,
+          direction: isDebit ? 'DEBIT' : 'CREDIT',
+          amount: isDebit ? updated.total.sub(existing.total) : existing.total.sub(updated.total),
+          description: `Ajuste de cuenta por edicion del pedido ${id.slice(0, 8)}`,
+          idempotencyKey: `order:${id}:total-adjustment:${Date.now()}`,
+          metadata: auditJson({ source: 'admin_order_edit', previousTotal: existing.total, nextTotal: updated.total }),
+        });
+      }
+
       if (stockAction?.decrementStock) {
         await Promise.all(
           existing.items.map(async (item) => {
@@ -279,14 +315,14 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
       return updated;
     });
 
-    if (data.status && data.status !== existing.status) {
+    if (data.status && previousStatus && data.status !== previousStatus) {
       await sendOrderStatusEmail({
         orderId: order.id,
         customerId: order.customerId,
         customerEmail: order.customerEmail,
         customerFirstName: order.customerFirstName,
         status: order.status,
-        previousStatus: existing.status,
+        previousStatus,
         total: order.total,
       });
     }
@@ -301,18 +337,19 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const data = paymentSchema.parse(req.body);
-    const existing = await prisma.order.findUnique({ where: { id } });
-
-    if (!existing) {
-      throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
-    }
-
-    const paidTotal = await prisma.payment.aggregate({ where: { orderId: id }, _sum: { amount: true } });
-    const nextPaidTotal = (paidTotal._sum.amount ?? new Prisma.Decimal(0)).add(data.amount);
-    const nextStatus = nextPaidTotal.greaterThanOrEqualTo(existing.total) ? 'PAID' : 'PARTIALLY_PAID';
 
     const order = await prisma.$transaction(async (tx) => {
-      await tx.payment.create({
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${id} FOR UPDATE`;
+      const existing = await tx.order.findUnique({ where: { id } });
+
+      if (!existing) {
+        throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+      }
+
+      const paidTotal = await tx.payment.aggregate({ where: { orderId: id }, _sum: { amount: true } });
+      const nextPaidTotal = (paidTotal._sum.amount ?? new Prisma.Decimal(0)).add(data.amount);
+      const nextStatus = nextPaidTotal.greaterThanOrEqualTo(existing.total) ? 'PAID' : 'PARTIALLY_PAID';
+      const payment = await tx.payment.create({
         data: {
           orderId: id,
           registeredById: req.user!.id,
@@ -321,6 +358,31 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
           method: data.method,
           notes: data.notes,
           paidAt: new Date(),
+        },
+      });
+
+      await createLedgerMovement(tx, {
+        customerId: existing.customerId,
+        orderId: id,
+        paymentId: payment.id,
+        actorId: req.user!.id,
+        type: CustomerAccountMovementType.PAYMENT_CREDIT,
+        direction: 'CREDIT',
+        amount: data.amount,
+        description: `Pago registrado para pedido ${id.slice(0, 8)}`,
+        idempotencyKey: `payment:${payment.id}:credit`,
+        metadata: auditJson({ source: 'admin_payment', method: data.method }),
+        occurredAt: payment.paidAt ?? payment.createdAt,
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          entityType: 'Payment',
+          entityId: payment.id,
+          action: 'CREATE',
+          before: Prisma.JsonNull,
+          after: auditJson(payment),
         },
       });
 

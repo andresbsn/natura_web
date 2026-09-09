@@ -261,6 +261,12 @@ button:disabled {
   grid-template-columns: 0.85fr 1.15fr;
 }
 
+.cartLayout {
+  align-items: start;
+  gap: 1.25rem;
+  grid-template-columns: minmax(0, 1fr) minmax(22rem, 0.95fr);
+}
+
 .module,
 .aboutContent,
 .adminForm,
@@ -529,6 +535,10 @@ button:disabled {
   gap: 1rem;
 }
 
+.cartList {
+  align-content: start;
+}
+
 .adminProductList,
 .userGrid {
   display: grid;
@@ -754,6 +764,74 @@ button:disabled {
 
 .orderTableRow {
   grid-template-columns: minmax(14rem, 1.5fr) minmax(5rem, 0.45fr) minmax(7rem, 0.65fr) auto auto minmax(8rem, 0.7fr);
+}
+
+.accountTableRow {
+  grid-template-columns: minmax(14rem, 1.5fr) minmax(10rem, 0.8fr) minmax(8rem, 0.55fr) minmax(8rem, 0.55fr);
+}
+
+.accountPage .sectionHeader {
+  align-items: stretch;
+}
+
+.balanceCard {
+  background: #fff;
+  border: 1px solid rgba(49, 93, 58, 0.12);
+  border-radius: 1.3rem;
+  box-shadow: 0 16px 38px rgba(43, 62, 38, 0.08);
+  min-width: 15rem;
+  padding: 1rem 1.2rem;
+}
+
+.balanceCard span {
+  color: #52624d;
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 900;
+  margin-bottom: 0.35rem;
+  text-transform: uppercase;
+}
+
+.balanceCard strong {
+  color: #315d3a;
+  font-size: 1.4rem;
+}
+
+.balanceCard.debt strong {
+  color: #8d5a22;
+}
+
+.accountMovementList {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.accountMovementRow {
+  align-items: center;
+  background: #fff;
+  border: 1px solid rgba(49, 93, 58, 0.1);
+  border-radius: 1rem;
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: minmax(14rem, 1fr) minmax(8rem, auto) minmax(10rem, auto) minmax(8rem, auto);
+  padding: 0.9rem 1rem;
+}
+
+.accountMovementRow small {
+  color: #52624d;
+}
+
+.debitAmount,
+.creditAmount {
+  font-weight: 900;
+}
+
+.debitAmount {
+  color: #8d5a22;
+}
+
+.creditAmount {
+  color: #315d3a;
 }
 
 .adminTableRow:hover {
@@ -1086,6 +1164,117 @@ button:disabled {
   grid-template-columns: 1.5fr 1fr 1fr 5rem auto;
 }
 
+.cartPage {
+  padding-top: 4.5rem;
+}
+
+.cartHeader {
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+
+.cartHeader h1 {
+  margin-bottom: 0;
+}
+
+.cartHeaderSummary {
+  background: rgba(49, 93, 58, 0.1);
+  border-radius: 999px;
+  color: #315d3a;
+  font-weight: 900;
+  margin: 0;
+  padding: 0.65rem 0.9rem;
+}
+
+.cartItem {
+  box-shadow: 0 14px 35px rgba(43, 62, 38, 0.07);
+  grid-template-columns: minmax(0, 1.5fr) auto auto minmax(5rem, 6rem) auto;
+  padding: 1rem;
+}
+
+.cartItemInfo {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.cartItemInfo strong,
+.cartItemPrice {
+  color: #1f2f23;
+}
+
+.cartItemInfo span,
+.cartItemUnit,
+.cartQuantity span {
+  color: #52624d;
+  font-size: 0.9rem;
+}
+
+.cartItemPrice {
+  white-space: nowrap;
+}
+
+.cartQuantity {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.cartQuantity input {
+  padding: 0.65rem 0.7rem;
+  text-align: center;
+}
+
+.cartRemoveButton {
+  background: rgba(164, 93, 45, 0.1) !important;
+  border: 0;
+  border-radius: 999px;
+  color: #8d3f26 !important;
+  font-weight: 900;
+  padding: 0.65rem 0.85rem !important;
+}
+
+.checkoutForm {
+  gap: 0.85rem;
+  padding: 1rem;
+}
+
+.checkoutForm label {
+  gap: 0.4rem;
+}
+
+.checkoutForm textarea {
+  min-height: 4.6rem;
+}
+
+.checkoutTotal {
+  align-items: center;
+  background: rgba(49, 93, 58, 0.08);
+  border-radius: 1.1rem;
+  display: flex;
+  justify-content: space-between;
+  padding: 0.9rem 1rem;
+}
+
+.checkoutTotal span {
+  color: #52624d;
+  font-weight: 800;
+}
+
+.checkoutTotal strong {
+  color: #1f2f23;
+  font-size: 1.35rem;
+}
+
+.compactStatus {
+  margin: 0;
+  padding: 0.75rem 0.9rem;
+}
+
+.checkoutActions {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.25rem;
+}
+
 .orderHeader {
   grid-template-columns: 1fr auto;
 }
@@ -1128,6 +1317,7 @@ button:disabled {
   .orderModalSummary,
   .orderModalGrid,
   .modernOrder,
+  .accountMovementRow,
   .cartLayout,
   .formRow,
   .adminProductList,
@@ -1159,6 +1349,11 @@ button:disabled {
   }
 
   .orderTableRow {
+    grid-template-columns: 1fr;
+  }
+
+  .accountTableRow,
+  .accountMovementRow {
     grid-template-columns: 1fr;
   }
 

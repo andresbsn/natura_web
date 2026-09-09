@@ -7,6 +7,11 @@ coverage
 .git
 .env
 .env.*
+docker-compose.prod.yml
+docker-compose.*.local.yml
 *.log
 uploads
+dumps
+backup_*.sql
+*_dump.sql
 .ai/tasks

@@ -48,4 +48,10 @@ docker compose -f docker-compose.prod.yml up -d
 docker compose -f docker-compose.prod.yml ps
 ```
 
+Para cargar los productos iniciales en la imagen de produccion:
+
+```bash
+docker compose -f docker-compose.prod.yml run --rm api npm run import:natura-products:prod -w apps/api
+```
+
 Antes de migraciones productivas con datos reales: hacer backup de PostgreSQL y tener definido el commit anterior para rollback.

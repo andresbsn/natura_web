@@ -1,16 +1,18 @@
-import { Prisma } from '@prisma/client';
+import { CustomerAccountMovementType, Prisma } from '@prisma/client';
 import { Router } from 'express';
 import { z } from 'zod';
 
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
-import { requireAuth, requireVerifiedActiveUser } from '../auth/auth.middleware.js';
+import { createLedgerMovement } from '../accounts/account-ledger.js';
+import { requireAuth, requireRole, requireVerifiedActiveUser } from '../auth/auth.middleware.js';
 import { mapOrder, orderInclude } from './order.mappers.js';
 import { RESERVED_ORDER_STATUSES, recalculateOrderItems } from './order-stock.js';
 
 export const ordersRouter = Router();
 
 ordersRouter.use(requireAuth);
+ordersRouter.use(requireRole('CUSTOMER'));
 ordersRouter.use(requireVerifiedActiveUser);
 
 const orderItemSchema = z.object({
@@ -150,6 +152,19 @@ ordersRouter.post('/', async (req, res, next) => {
         })),
       });
 
+      await createLedgerMovement(tx, {
+        customerId: customer.id,
+        orderId: created.id,
+        actorId: customer.id,
+        type: CustomerAccountMovementType.ORDER_CHARGE,
+        direction: 'DEBIT',
+        amount: total,
+        description: `Cargo por pedido ${created.id.slice(0, 8)}`,
+        idempotencyKey: `order:${created.id}:charge`,
+        metadata: { source: 'order_create' },
+        occurredAt: created.createdAt,
+      });
+
       return created;
     });
 
@@ -163,6 +178,7 @@ ordersRouter.patch('/:id/cancel', async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
     const order = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${id} FOR UPDATE`;
       const existing = await tx.order.findFirst({
         where: { id, customerId: req.user!.id },
         include: { items: true },
@@ -191,6 +207,18 @@ ordersRouter.patch('/:id/cancel', async (req, res, next) => {
           quantity: item.quantity,
           reason: 'Cancelacion cliente',
         })),
+      });
+
+      await createLedgerMovement(tx, {
+        customerId: existing.customerId,
+        orderId: id,
+        actorId: req.user!.id,
+        type: CustomerAccountMovementType.ORDER_CANCEL_CREDIT,
+        direction: 'CREDIT',
+        amount: existing.total,
+        description: `Credito por cancelacion del pedido ${id.slice(0, 8)}`,
+        idempotencyKey: `order:${id}:cancel-credit`,
+        metadata: { source: 'customer_cancel' },
       });
 
       return updated;

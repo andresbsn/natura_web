@@ -89,6 +89,35 @@ type Promotion = {
   catalogId: string | null;
 };
 
+type AccountMovement = {
+  id: string;
+  orderId: string | null;
+  paymentId: string | null;
+  actorId: string | null;
+  type: string;
+  direction: 'DEBIT' | 'CREDIT';
+  amount: number;
+  balanceAfter: number;
+  description: string | null;
+  occurredAt: string;
+  createdAt: string;
+};
+
+type CustomerAccount = {
+  id: string;
+  customerId: string;
+  currentBalance: number;
+  currency: string;
+  lastMovementAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AdminCustomerAccount = CustomerAccount & {
+  customer: { id: string; email: string; firstName: string; lastName: string; phone: string | null; isActive: boolean };
+  movementCount: number;
+};
+
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'efectivo', label: 'Efectivo' },
   { value: 'transferencia', label: 'Transferencia' },
@@ -203,6 +232,22 @@ function formatPrice(amount: number) {
   return amount.toLocaleString('es-AR', { currency: 'ARS', maximumFractionDigits: 0, style: 'currency' });
 }
 
+function accountMovementLabel(type: string) {
+  if (type === 'ORDER_CHARGE') return 'Cargo por pedido';
+  if (type === 'ORDER_CANCEL_CREDIT') return 'Crédito por cancelación';
+  if (type === 'PAYMENT_CREDIT') return 'Pago registrado';
+  if (type === 'PAYMENT_REFUND_DEBIT') return 'Reembolso';
+  if (type === 'MANUAL_DEBIT_ADJUSTMENT') return 'Ajuste débito';
+  if (type === 'MANUAL_CREDIT_ADJUSTMENT') return 'Ajuste crédito';
+  return type;
+}
+
+function balanceText(balance: number) {
+  if (balance > 0) return `Debe ${formatPrice(balance)}`;
+  if (balance < 0) return `Saldo a favor ${formatPrice(Math.abs(balance))}`;
+  return 'Sin deuda';
+}
+
 function productVariant(product: CatalogProduct) {
   return product.variants[0] ?? null;
 }
@@ -238,6 +283,7 @@ function Nav({ cartCount, user, navigate, path }: { cartCount: number; user: Aut
     ['/productos', 'Productos'],
     ['/carrito', `Carrito (${cartCount})`],
     ...(user ? [['/mis-pedidos', 'Mis pedidos']] : []),
+    ...(user?.role === 'CUSTOMER' ? [['/cuenta-corriente', 'Cuenta corriente']] : []),
     ...(isAdmin(user) ? [['/admin', 'Admin']] : []),
     [user ? '/cuenta' : '/login', user ? user.firstName : 'Ingresar'],
   ];
@@ -307,7 +353,10 @@ export function App() {
   const [deliveryMethods, setDeliveryMethods] = useState<DeliveryMethod[]>([]);
   const [selectedProductId, setSelectedProductId] = useState('');
   const [orders, setOrders] = useState<Order[]>([]);
+  const [account, setAccount] = useState<CustomerAccount | null>(null);
+  const [accountMovements, setAccountMovements] = useState<AccountMovement[]>([]);
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [adminAccounts, setAdminAccounts] = useState<AdminCustomerAccount[]>([]);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [cart, setCart] = useState<CartItem[]>(() => JSON.parse(localStorage.getItem('cart') ?? '[]') as CartItem[]);
   const [isLoading, setIsLoading] = useState(true);
@@ -329,8 +378,11 @@ export function App() {
     setToken('');
     setUser(null);
     setOrders([]);
+    setAccount(null);
+    setAccountMovements([]);
     setAdminProducts([]);
     setAdminUsers([]);
+    setAdminAccounts([]);
     setPromotions([]);
   }, []);
 
@@ -379,20 +431,29 @@ export function App() {
     setOrders(data.orders);
   }, [authenticatedRequest, token]);
 
+  const loadAccount = useCallback(async (accessToken = token) => {
+    if (!accessToken || user?.role !== 'CUSTOMER') return;
+    const data = await authenticatedRequest<{ account: CustomerAccount; movements: AccountMovement[] }>('/api/account/me', { headers: { Authorization: `Bearer ${accessToken}` } });
+    setAccount(data.account);
+    setAccountMovements(data.movements);
+  }, [authenticatedRequest, token, user]);
+
   const loadAdminData = useCallback(async (accessToken = token) => {
     if (!accessToken || !isAdmin(user)) return;
-    const [adminProductsData, adminOrdersData, adminUsersData, deliveryMethodsData, promotionsData] = await Promise.all([
+    const [adminProductsData, adminOrdersData, adminUsersData, deliveryMethodsData, promotionsData, adminAccountsData] = await Promise.all([
       authenticatedRequest<{ products: CatalogProduct[] }>('/api/admin/products', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ orders: Order[] }>('/api/admin/orders', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ users: AdminUser[] }>('/api/admin/users', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ deliveryMethods: DeliveryMethod[] }>('/api/admin/delivery-methods', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ promotions: Promotion[] }>('/api/admin/promotions', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      authenticatedRequest<{ accounts: AdminCustomerAccount[] }>('/api/admin/customer-accounts', { headers: { Authorization: `Bearer ${accessToken}` } }),
     ]);
     setAdminProducts(adminProductsData.products);
     setOrders(adminOrdersData.orders);
     setAdminUsers(adminUsersData.users);
     setDeliveryMethods(deliveryMethodsData.deliveryMethods);
     setPromotions(promotionsData.promotions);
+    setAdminAccounts(adminAccountsData.accounts);
   }, [authenticatedRequest, token, user]);
 
   useEffect(() => {
@@ -409,7 +470,8 @@ export function App() {
   useEffect(() => {
     if (!token) return;
     void loadOrders(token).catch(() => undefined);
-  }, [loadOrders, token]);
+    void loadAccount(token).catch(() => undefined);
+  }, [loadAccount, loadOrders, token]);
 
   useEffect(() => {
     if (!token || !isAdmin(user)) return;
@@ -582,6 +644,7 @@ export function App() {
       setCart([]);
       setMessage('Pedido creado. La administradora lo va a revisar y confirmar.');
       await loadOrders();
+      await loadAccount();
       navigate('/mis-pedidos');
     } catch (requestError) {
       if (isSessionExpiredRedirect(requestError)) return;
@@ -599,6 +662,7 @@ export function App() {
       setMessage('Pedido cancelado. La reserva de stock fue liberada.');
       await loadCatalog();
       await loadOrders();
+      await loadAccount();
     } catch (requestError) {
       if (isSessionExpiredRedirect(requestError)) return;
       setError(requestError instanceof Error ? requestError.message : 'No se pudo cancelar el pedido');
@@ -617,6 +681,7 @@ export function App() {
     event.currentTarget.reset();
     await loadCatalog();
     await loadAdminData();
+    await loadAccount();
   }
 
   async function handleCreateProduct(event: FormEvent<HTMLFormElement>) {
@@ -640,6 +705,7 @@ export function App() {
     setMessage('Producto creado');
     await loadCatalog();
     await loadAdminData();
+    await loadAccount();
   }
 
   async function handleUpdateProduct(event: FormEvent<HTMLFormElement>) {
@@ -664,6 +730,24 @@ export function App() {
     await loadAdminData();
   }
 
+  async function createAccountAdjustment(customerId: string, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await authenticatedRequest(`/api/admin/customer-accounts/${customerId}/adjustments`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        direction: form.get('direction'),
+        amount: Number(form.get('amount') ?? 0),
+        description: form.get('description'),
+      }),
+    });
+    event.currentTarget.reset();
+    setMessage('Ajuste de cuenta corriente registrado');
+    await loadAdminData();
+    await loadAccount();
+  }
+
   async function updateAdminOrder(id: string, status: string, paymentStatus: string) {
     await authenticatedRequest(`/api/admin/orders/${id}`, {
       method: 'PATCH',
@@ -671,6 +755,7 @@ export function App() {
       body: JSON.stringify({ status, paymentStatus }),
     });
     await loadAdminData();
+    await loadAccount();
   }
 
   async function updateAdminOrderDetails(id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) {
@@ -681,6 +766,7 @@ export function App() {
     });
     await loadCatalog();
     await loadAdminData();
+    await loadAccount();
   }
 
   async function updateAdminUser(id: string, isActive: boolean, password?: string) {
@@ -726,6 +812,7 @@ export function App() {
     });
     event.currentTarget.reset();
     await loadAdminData();
+    await loadAccount();
   }
 
   async function upsertPromotion(event: FormEvent<HTMLFormElement>) {
@@ -766,8 +853,9 @@ export function App() {
     if (path === '/verificar-email') return <VerifyEmailPage error={error} onVerify={handleVerifyEmail} navigate={navigate} />;
     if (path === '/carrito') return <CartPage cartProducts={cartProducts} deliveryMethods={deliveryMethods} total={cartTotal} user={user} navigate={navigate} onQuantity={updateCartQuantity} onCreateOrder={handleCreateOrder} error={error} />;
     if (path === '/mis-pedidos') return <OrdersPage orders={orders} user={user} navigate={navigate} onCancelOrder={cancelOrder} error={error} />;
+    if (path === '/cuenta-corriente') return <CustomerAccountPage user={user} account={account} movements={accountMovements} navigate={navigate} />;
     if (path === '/cuenta') return <AccountPage user={user} onLogout={logout} navigate={navigate} />;
-    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onUpsertPromotion={upsertPromotion} />;
+    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} accounts={adminAccounts} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} />;
     return <HomePage products={featuredProducts} onAdd={addToCart} navigate={navigate} />;
   }
 
@@ -902,7 +990,50 @@ function CartPage({ cartProducts, deliveryMethods, total, user, navigate, onQuan
   const selectedDeliveryMethod = deliveryMethods.find((method) => method.id === deliveryMethodId) ?? null;
   const orderTotal = total + (selectedDeliveryMethod?.cost ?? 0);
 
-  return <section className="section pageSection"><p className="eyebrow">Carrito</p><h1>Tu pedido.</h1>{error ? <p className="statusText errorText">{error}</p> : null}{cartProducts.length === 0 ? <p className="statusText">El carrito esta vacio.</p> : <div className="cartLayout"><div className="cartList">{cartProducts.map(({ product, variant, quantity }) => <article className="cartItem" key={variant.id}><strong>{product.name}</strong><span>{variant.name}</span><span>{formatPrice((variant.currentPrice?.amount ?? 0) * quantity)}</span><input max={variant.availableStock} min="1" type="number" value={quantity} onChange={(event) => onQuantity(variant.id, Number(event.target.value))} /><button type="button" onClick={() => onQuantity(variant.id, 0)}>Quitar</button></article>)}</div><form className="adminForm checkoutForm" onSubmit={onCreateOrder}><h3>Total: {formatPrice(orderTotal)}</h3><label>Tipo de entrega<select name="deliveryMethodId" value={deliveryMethodId} onChange={(event) => setDeliveryMethodId(event.target.value)}><option value="">Coordinar entrega</option>{deliveryMethods.map((method) => <option key={method.id} value={method.id}>{method.name} · {formatPrice(method.cost)}</option>)}</select></label>{selectedDeliveryMethod?.description ? <p className="statusText">{selectedDeliveryMethod.description}</p> : null}<label>Direccion si corresponde<textarea name="deliveryAddress" rows={3} required={Boolean(selectedDeliveryMethod?.requiresAddress)} /></label><label>Notas<textarea name="deliveryNotes" rows={3} /></label>{!user ? <p className="statusText">Para confirmar tenes que iniciar sesion o registrarte.</p> : null}<button type="submit">{user ? 'Confirmar pedido' : 'Iniciar sesion para confirmar'}</button><button className="secondaryButton" type="button" onClick={() => navigate('/productos')}>Seguir comprando</button></form></div>}</section>;
+  return (
+    <section className="section pageSection cartPage">
+      <div className="sectionHeader cartHeader">
+        <div>
+          <p className="eyebrow">Carrito</p>
+          <h1>Tu pedido.</h1>
+        </div>
+        {cartProducts.length > 0 ? <p className="cartHeaderSummary">{cartProducts.length} producto{cartProducts.length === 1 ? '' : 's'} · {formatPrice(total)}</p> : null}
+      </div>
+      {error ? <p className="statusText errorText">{error}</p> : null}
+      {cartProducts.length === 0 ? <p className="statusText">El carrito esta vacio.</p> : (
+        <div className="cartLayout">
+          <div className="cartList">
+            {cartProducts.map(({ product, variant, quantity }) => (
+              <article className="cartItem" key={variant.id}>
+                <div className="cartItemInfo">
+                  <strong>{product.name}</strong>
+                </div>
+                <span className="cartItemUnit">{variant.name}</span>
+                <strong className="cartItemPrice">{formatPrice((variant.currentPrice?.amount ?? 0) * quantity)}</strong>
+                <label className="cartQuantity">
+                  <span>Cantidad</span>
+                  <input max={variant.availableStock} min="1" type="number" value={quantity} onChange={(event) => onQuantity(variant.id, Number(event.target.value))} />
+                </label>
+                <button className="cartRemoveButton" type="button" onClick={() => onQuantity(variant.id, 0)}>Quitar</button>
+              </article>
+            ))}
+          </div>
+          <form className="adminForm checkoutForm" onSubmit={onCreateOrder}>
+            <div className="checkoutTotal"><span>Total</span><strong>{formatPrice(orderTotal)}</strong></div>
+            <label>Tipo de entrega<select name="deliveryMethodId" value={deliveryMethodId} onChange={(event) => setDeliveryMethodId(event.target.value)}><option value="">Coordinar entrega</option>{deliveryMethods.map((method) => <option key={method.id} value={method.id}>{method.name} · {formatPrice(method.cost)}</option>)}</select></label>
+            {selectedDeliveryMethod?.description ? <p className="statusText compactStatus">{selectedDeliveryMethod.description}</p> : null}
+            <label>Direccion si corresponde<textarea name="deliveryAddress" rows={2} required={Boolean(selectedDeliveryMethod?.requiresAddress)} /></label>
+            <label>Notas<textarea name="deliveryNotes" rows={2} /></label>
+            {!user ? <p className="statusText compactStatus">Para confirmar tenes que iniciar sesion o registrarte.</p> : null}
+            <div className="checkoutActions">
+              <button type="submit">{user ? 'Confirmar pedido' : 'Iniciar sesion para confirmar'}</button>
+              <button className="secondaryButton" type="button" onClick={() => navigate('/productos')}>Seguir comprando</button>
+            </div>
+          </form>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function OrdersPage({ orders, user, navigate, onCancelOrder, error }: { orders: Order[]; user: AuthUser | null; navigate: (path: string) => void; onCancelOrder: (id: string) => void; error: string | null }) {
@@ -913,6 +1044,91 @@ function OrdersPage({ orders, user, navigate, onCancelOrder, error }: { orders: 
 function AccountPage({ user, onLogout, navigate }: { user: AuthUser | null; onLogout: () => void; navigate: (path: string) => void }) {
   if (!user) return <section className="section"><p className="statusText">No hay sesion activa.</p><button className="primary" type="button" onClick={() => navigate('/login')}>Ingresar</button></section>;
   return <section className="section authSection"><p className="eyebrow">Cuenta</p><h1>{user.firstName} {user.lastName}</h1><p className="statusText">{user.email} · {user.role}</p><button className="primary" type="button" onClick={onLogout}>Cerrar sesion</button></section>;
+}
+
+function CustomerAccountPage({ user, account, movements, navigate }: { user: AuthUser | null; account: CustomerAccount | null; movements: AccountMovement[]; navigate: (path: string) => void }) {
+  if (!user) return <section className="section"><p className="statusText">Inicia sesion para ver tu cuenta corriente.</p><button className="primary" type="button" onClick={() => navigate('/login')}>Ingresar</button></section>;
+  if (user.role !== 'CUSTOMER') return <section className="section"><p className="statusText errorText">La cuenta corriente publica esta disponible solo para clientes.</p><button className="primary" type="button" onClick={() => navigate('/admin/cuentas')}>Ver cuentas admin</button></section>;
+
+  return (
+    <section className="section pageSection accountPage">
+      <div className="sectionHeader">
+        <div><p className="eyebrow">Cuenta corriente</p><h1>Saldo y movimientos.</h1><p className="statusText">Aca vas a ver cargos de pedidos, pagos registrados y ajustes de tu cuenta.</p></div>
+        <div className={`balanceCard ${(account?.currentBalance ?? 0) > 0 ? 'debt' : 'ok'}`}><span>Saldo actual</span><strong>{balanceText(account?.currentBalance ?? 0)}</strong></div>
+      </div>
+      <AccountMovementList movements={movements} emptyText="Todavia no hay movimientos en tu cuenta corriente." />
+    </section>
+  );
+}
+
+function AccountMovementList({ movements, emptyText }: { movements: AccountMovement[]; emptyText: string }) {
+  if (movements.length === 0) return <p className="statusText">{emptyText}</p>;
+
+  return (
+    <div className="accountMovementList">
+      {movements.map((movement) => (
+        <article className="accountMovementRow" key={movement.id}>
+          <div><strong>{accountMovementLabel(movement.type)}</strong><small>{movement.description || 'Movimiento de cuenta'}{movement.orderId ? ` · Pedido ${movement.orderId.slice(0, 8)}` : ''}</small></div>
+          <span className={movement.direction === 'DEBIT' ? 'debitAmount' : 'creditAmount'}>{movement.direction === 'DEBIT' ? '+' : '-'} {formatPrice(movement.amount)}</span>
+          <span>{balanceText(movement.balanceAfter)}</span>
+          <small>{new Date(movement.occurredAt).toLocaleString('es-AR')}</small>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function AccountsAdmin({ accounts, onCreateAccountAdjustment }: { accounts: AdminCustomerAccount[]; onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void> }) {
+  const [search, setSearch] = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const normalized = search.trim().toLowerCase();
+  const filteredAccounts = normalized
+    ? accounts.filter((account) => [account.customer.firstName, account.customer.lastName, account.customer.email, account.customer.phone, balanceText(account.currentBalance)].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalized)))
+    : accounts;
+  const selectedAccount = accounts.find((candidate) => candidate.customerId === selectedCustomerId) ?? null;
+  const totalDebt = accounts.reduce((total, account) => total + Math.max(account.currentBalance, 0), 0);
+  const customersWithDebt = accounts.filter((account) => account.currentBalance > 0).length;
+
+  return (
+    <section className="adminPage">
+      <div className="adminPageHeader"><div><p className="eyebrow">Cuentas corrientes</p><h2>Saldos de clientes.</h2><p>Consulta deuda, saldo a favor y registra ajustes manuales auditables.</p></div><div className="adminStats"><span>{accounts.length} cuentas</span><span>{customersWithDebt} con deuda</span><span>{formatPrice(totalDebt)} a cobrar</span></div></div>
+      <section className="adminCard productListCard">
+        <div className="cardHeader productToolbar"><div><h3>Clientes</h3><span>{filteredAccounts.length} de {accounts.length} registros</span></div></div>
+        <input className="searchInput adminSearch" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por cliente, email, telefono o saldo" />
+        {filteredAccounts.length === 0 ? <p className="statusText">No encontramos cuentas con ese filtro.</p> : null}
+        {filteredAccounts.length > 0 ? <div className="adminTable">{filteredAccounts.map((account) => <button className="adminTableRow accountTableRow" key={account.id} type="button" onClick={() => setSelectedCustomerId(account.customerId)}><span><strong>{account.customer.firstName} {account.customer.lastName}</strong><small>{account.customer.email}</small></span><span className={`pill ${account.currentBalance > 0 ? 'warning' : 'ok'}`}>{balanceText(account.currentBalance)}</span><span>{account.movementCount} movimientos</span><span>{account.lastMovementAt ? new Date(account.lastMovementAt).toLocaleDateString('es-AR') : 'Sin movimientos'}</span></button>)}</div> : null}
+      </section>
+      {selectedAccount ? <AccountAdjustmentModal account={selectedAccount} onClose={() => setSelectedCustomerId('')} onCreateAccountAdjustment={onCreateAccountAdjustment} /> : null}
+    </section>
+  );
+}
+
+function AccountAdjustmentModal({ account, onClose, onCreateAccountAdjustment }: { account: AdminCustomerAccount; onClose: () => void; onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void> }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  async function submitAdjustment(event: FormEvent<HTMLFormElement>) {
+    await onCreateAccountAdjustment(account.customerId, event);
+    onClose();
+  }
+
+  return (
+    <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
+      <form aria-labelledby="accountModalTitle" aria-modal="true" className="adminForm productModal" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onSubmit={submitAdjustment} onMouseDown={(event) => event.stopPropagation()} role="dialog">
+        <div className="modalHeader"><div><p className="eyebrow">Cuenta corriente</p><h3 id="accountModalTitle">{account.customer.firstName} {account.customer.lastName}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
+        <div className="adminStats"><span>{account.customer.email}</span><span>{balanceText(account.currentBalance)}</span></div>
+        <div className="modalFields">
+          <label>Tipo de ajuste<select name="direction" defaultValue="CREDIT" required><option value="CREDIT">Crédito: baja deuda o genera saldo a favor</option><option value="DEBIT">Débito: aumenta deuda</option></select></label>
+          <label>Monto<input name="amount" type="number" min="0.01" step="0.01" required /></label>
+          <label>Motivo<textarea name="description" minLength={3} maxLength={600} rows={3} placeholder="Ej: cancelacion de deuda acordada, ajuste por diferencia, saldo inicial" required /></label>
+        </div>
+        <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="submit">Registrar ajuste</button></div>
+      </form>
+    </div>
+  );
 }
 
 /*
@@ -943,6 +1159,7 @@ type AdminPageProps = {
   deliveryMethods: DeliveryMethod[];
   orders: Order[];
   users: AdminUser[];
+  accounts: AdminCustomerAccount[];
   promotions: Promotion[];
   selectedProduct: CatalogProduct | null;
   selectedProductId: string;
@@ -955,6 +1172,7 @@ type AdminPageProps = {
   onUpdateUser: (id: string, isActive: boolean, password?: string) => void | Promise<void>;
   onUpsertDeliveryMethod: AdminFormSubmit;
   onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onUpsertPromotion: AdminFormSubmit;
 };
 
@@ -975,6 +1193,7 @@ function AdminPage(props: AdminPageProps) {
           {[
             ['/admin/productos', 'Productos'],
             ['/admin/pedidos', 'Pedidos'],
+            ['/admin/cuentas', 'Cuentas corrientes'],
             ['/admin/promociones', 'Promociones'],
             ['/admin/usuarios', 'Usuarios'],
             ['/admin/configuracion', 'Configuracion'],
@@ -983,10 +1202,11 @@ function AdminPage(props: AdminPageProps) {
       </aside>
       <div className="adminWorkspace">
         {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} products={props.products} onRegisterPayment={props.onRegisterPayment} onUpdateOrder={props.onUpdateOrder} onUpdateOrderDetails={props.onUpdateOrderDetails} /> : null}
+        {currentPath === '/admin/cuentas' ? <AccountsAdmin accounts={props.accounts} onCreateAccountAdjustment={props.onCreateAccountAdjustment} /> : null}
         {currentPath === '/admin/promociones' ? <PromotionsAdmin categories={props.categories} products={props.products} promotions={props.promotions} onUpsertPromotion={props.onUpsertPromotion} /> : null}
         {currentPath === '/admin/usuarios' ? <UserAdminModern users={props.users} onUpdateUser={props.onUpdateUser} /> : null}
         {currentPath === '/admin/configuracion' ? <SettingsAdmin deliveryMethods={props.deliveryMethods} onUpsertDeliveryMethod={props.onUpsertDeliveryMethod} /> : null}
-        {!['/admin/pedidos', '/admin/promociones', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
+        {!['/admin/pedidos', '/admin/cuentas', '/admin/promociones', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
       </div>
     </section>
   );

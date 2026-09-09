@@ -28,6 +28,7 @@ El proyecto usa npm workspaces con `apps/api` y `apps/web`.
 - generate client: `npm run prisma:generate`
 - development migration: `npm run prisma:migrate`
 - import initial Natura products: `npm run import:natura-products -w apps/api`
+- import initial Natura products in production container: `docker compose -f docker-compose.prod.yml run --rm api npm run import:natura-products:prod -w apps/api`
 - direct workspace generate: `npm run prisma:generate -w apps/api`
 - direct workspace migrate: `npm run prisma:migrate -w apps/api`
 - Docker migrate against `postgres.ecom_natura`: `docker compose run --rm api npm run prisma:migrate -w apps/api`

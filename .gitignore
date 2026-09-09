@@ -3,7 +3,12 @@ dist/
 build/
 .env
 .env.*
+docker-compose.prod.yml
+docker-compose.*.local.yml
 coverage/
 .DS_Store
 *.log
 uploads/
+dumps/
+backup_*.sql
+*_dump.sql
