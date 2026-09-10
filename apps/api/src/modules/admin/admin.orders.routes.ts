@@ -169,10 +169,10 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
       if (data.items) {
         const variantIds = [...new Set(data.items.map((item) => item.variantId))];
         const variants = await tx.productVariant.findMany({
-          where: { id: { in: variantIds }, isActive: true, product: { isActive: true } },
+          where: { id: { in: variantIds } },
           include: {
             product: { include: { category: { include: { promotions: true } }, promotions: true } },
-            prices: { orderBy: { createdAt: 'desc' }, take: 1, include: { catalog: { include: { promotions: true } } } },
+            prices: { orderBy: { createdAt: 'desc' }, include: { catalog: { include: { promotions: true } } } },
             promotions: true,
           },
         });
@@ -186,7 +186,7 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
           _sum: { quantity: true },
         });
         const reservedByVariantId = new Map(reservations.map((reservation) => [reservation.variantId, reservation._sum.quantity ?? 0]));
-        const { items, subtotal } = recalculateOrderItems(data.items, variants);
+        const { items, subtotal } = recalculateOrderItems(data.items, variants, existing.items);
 
         for (const item of items) {
           const variant = variants.find((candidate) => candidate.id === item.variantId);

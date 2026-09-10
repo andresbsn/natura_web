@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
+import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 
 export class AppError extends Error {
@@ -34,6 +35,12 @@ export function errorHandler(error: unknown, _req: Request, res: Response, _next
         message: error.code === 'LIMIT_FILE_SIZE' ? 'La imagen no puede superar 5 MB' : 'No se pudo subir la imagen',
       },
     });
+  }
+
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (error.code === 'P2002' || error.code === 'P2004') {
+      return res.status(409).json({ error: { code: error.code === 'P2004' ? 'CATALOG_PERIOD_OVERLAP_OR_INVALID' : 'RESOURCE_CONFLICT', message: 'The requested change conflicts with existing data' } });
+    }
   }
 
   if (error instanceof AppError) {

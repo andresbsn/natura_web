@@ -107,9 +107,6 @@ function variantUpdateData(variant: z.infer<typeof variantSchema>): Prisma.Produ
     attributes: variant.attributes as Prisma.InputJsonValue | undefined,
     stockQuantity: variant.stockQuantity,
     isActive: variant.isActive ?? true,
-    prices: {
-      create: { amount: variant.price },
-    },
   };
 }
 
@@ -220,7 +217,7 @@ adminProductsRouter.get('/products', async (_req, res, next) => {
       orderBy: { createdAt: 'desc' },
       include: productInclude,
     });
-    res.json({ products: products.map(mapProduct) });
+      res.json({ products: products.map((product) => mapProduct(product, true, true)) });
   } catch (error) {
     next(error);
   }
@@ -265,7 +262,7 @@ adminProductsRouter.post('/products', imageUpload.single('image'), async (req, r
       return created;
     });
 
-    res.status(201).json({ product: mapProduct(product) });
+    res.status(201).json({ product: mapProduct(product, false, true) });
   } catch (error) {
     await deleteUploadedFile(req.file);
     next(error);
@@ -317,6 +314,9 @@ adminProductsRouter.patch('/products/:id', imageUpload.single('image'), async (r
 
         if (currentVariant && nextVariant) {
           await tx.productVariant.update({ where: { id: currentVariant.id }, data: variantUpdateData(nextVariant) });
+          const basePrice = await tx.price.findFirst({ where: { variantId: currentVariant.id, catalogId: null } });
+          if (basePrice) await tx.price.update({ where: { id: basePrice.id }, data: { amount: nextVariant.price } });
+          else await tx.price.create({ data: { variantId: currentVariant.id, amount: nextVariant.price } });
         } else if (nextVariant) {
           await tx.productVariant.create({ data: { ...variantCreateData(nextVariant), product: { connect: { id } } } });
         }
@@ -342,7 +342,7 @@ adminProductsRouter.patch('/products/:id', imageUpload.single('image'), async (r
       await deleteLocalProductImages(existing.images);
     }
 
-    res.json({ product: mapProduct(product) });
+    res.json({ product: mapProduct(product, false, true) });
   } catch (error) {
     await deleteUploadedFile(req.file);
     next(error);

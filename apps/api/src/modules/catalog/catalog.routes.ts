@@ -68,7 +68,7 @@ catalogRouter.get('/products', async (req, res, next) => {
       include: productInclude,
     });
 
-    res.json({ products: products.map(mapProduct) });
+    res.json({ products: products.map((product) => mapProduct(product)) });
   } catch (error) {
     next(error);
   }

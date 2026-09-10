@@ -762,6 +762,10 @@ button:disabled {
   grid-template-columns: minmax(14rem, 1.5fr) minmax(7rem, 0.65fr) minmax(8rem, 0.8fr) auto minmax(7rem, 0.65fr);
 }
 
+.catalogTableRow {
+  grid-template-columns: minmax(14rem, 1.5fr) minmax(7rem, 0.65fr) auto minmax(7rem, 0.65fr);
+}
+
 .orderTableRow {
   grid-template-columns: minmax(14rem, 1.5fr) minmax(5rem, 0.45fr) minmax(7rem, 0.65fr) auto auto minmax(8rem, 0.7fr);
 }
@@ -903,6 +907,38 @@ button:disabled {
 
 .createProductModal {
   max-width: 1040px;
+}
+
+.catalogModal,
+.catalogPricesModal {
+  max-width: 760px;
+}
+
+.catalogPriceList {
+  display: grid;
+  gap: 0.65rem;
+  max-height: 28rem;
+  overflow: auto;
+}
+
+.catalogPriceRow {
+  align-items: center;
+  background: #fff;
+  border: 1px solid rgba(49, 93, 58, 0.1);
+  border-radius: 1rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr) 9rem;
+  padding: 0.8rem 1rem;
+}
+
+.catalogPriceRow span {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.catalogPriceRow small {
+  color: #52624d;
 }
 
 .createModalGrid {
@@ -1493,6 +1529,11 @@ button:disabled {
   }
 
   .promotionTableRow {
+    grid-template-columns: 1fr;
+  }
+
+  .catalogTableRow,
+  .catalogPriceRow {
     grid-template-columns: 1fr;
   }
 

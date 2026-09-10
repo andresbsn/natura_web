@@ -80,4 +80,22 @@ describe('order stock rules', () => {
     expect(result.items[0].lineTotal.toNumber()).toBe(160);
     expect(result.subtotal.toNumber()).toBe(160);
   });
+
+  it('preserves frozen snapshots for existing variants and prices new variants currently', () => {
+    const result = recalculateOrderItems(
+      [{ variantId: 'existing', quantity: 3 }, { variantId: 'new', quantity: 1 }],
+      [
+        { id: 'existing', sku: 'NEW-SKU', name: 'Nuevo nombre', stockQuantity: 5, product: { name: 'Nuevo producto' }, prices: [{ amount: new Prisma.Decimal(200) }] },
+        { id: 'new', sku: 'SKU-NEW', name: 'Nueva variante', stockQuantity: 5, product: { name: 'Nuevo producto' }, prices: [{ amount: new Prisma.Decimal(75) }] },
+      ],
+      [{ variantId: 'existing', productNameSnapshot: 'Producto original', variantNameSnapshot: 'Variante original', skuSnapshot: 'SKU-OLD', unitPrice: new Prisma.Decimal(100), discountAmount: new Prisma.Decimal(10) }],
+    );
+
+    expect(result.items[0]).toMatchObject({ variantId: 'existing', productNameSnapshot: 'Producto original', variantNameSnapshot: 'Variante original', skuSnapshot: 'SKU-OLD', quantity: 3 });
+    expect(result.items[0].unitPrice.toNumber()).toBe(100);
+    expect(result.items[0].discountAmount.toNumber()).toBe(10);
+    expect(result.items[0].lineTotal.toNumber()).toBe(300);
+    expect(result.items[1].unitPrice.toNumber()).toBe(75);
+    expect(result.subtotal.toNumber()).toBe(375);
+  });
 });

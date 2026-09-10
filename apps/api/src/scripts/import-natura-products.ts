@@ -119,10 +119,7 @@ async function main() {
                 name: 'Unidad',
                 stockQuantity: item.stockQuantity,
                 isActive: item.orderable && item.inStock,
-                prices: {
-                  deleteMany: {},
-                  create: { amount: item.price },
-                },
+                  prices: { deleteMany: { catalogId: null }, create: { amount: item.price } },
               },
               create: {
                 sku: item.productId,

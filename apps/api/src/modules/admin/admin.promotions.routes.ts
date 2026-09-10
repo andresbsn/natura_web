@@ -53,6 +53,15 @@ function assertPromotionTarget(data: z.infer<typeof promotionSchema>) {
   }
 }
 
+async function assertPromotionTargetExists(data: z.infer<typeof promotionSchema>) {
+  const target = targetForScope(data);
+  const exists = data.scope === 'PRODUCT' ? await prisma.product.findUnique({ where: { id: target.productId! }, select: { id: true } })
+    : data.scope === 'VARIANT' ? await prisma.productVariant.findUnique({ where: { id: target.variantId! }, select: { id: true } })
+      : data.scope === 'CATEGORY' ? await prisma.category.findUnique({ where: { id: target.categoryId! }, select: { id: true } })
+        : await prisma.catalog.findUnique({ where: { id: target.catalogId! }, select: { id: true } });
+  if (!exists) throw new AppError(400, 'Promotion target does not exist', 'PROMOTION_TARGET_NOT_FOUND');
+}
+
 function mapPromotion(promotion: {
   id: string;
   name: string;
@@ -86,6 +95,7 @@ adminPromotionsRouter.post('/promotions', async (req, res, next) => {
   try {
     const data = promotionSchema.parse(req.body);
     assertPromotionTarget(data);
+    await assertPromotionTargetExists(data);
     const target = targetForScope(data);
     const promotion = await prisma.$transaction(async (tx) => {
       const created = await tx.promotion.create({
@@ -126,6 +136,7 @@ adminPromotionsRouter.patch('/promotions/:id', async (req, res, next) => {
 
     const data = promotionSchema.parse({ ...existing, value: existing.value.toNumber(), ...req.body });
     assertPromotionTarget(data);
+    await assertPromotionTargetExists(data);
     const target = targetForScope(data);
     const promotion = await prisma.$transaction(async (tx) => {
       const updated = await tx.promotion.update({

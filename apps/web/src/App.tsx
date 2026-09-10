@@ -16,6 +16,7 @@ type CatalogProduct = {
     stockQuantity: number;
     availableStock: number;
     reservedQuantity: number;
+    prices?: Array<{ id: string; amount: number; catalogId: string | null }>;
     currentPrice: { amount: number; originalAmount: number; discountAmount: number; promotion: { id: string; name: string; discountType: string } | null } | null;
   }>;
 };
@@ -87,6 +88,15 @@ type Promotion = {
   variantId: string | null;
   categoryId: string | null;
   catalogId: string | null;
+};
+
+type Catalog = {
+  id: string;
+  name: string;
+  startsAt: string;
+  endsAt: string;
+  isActive: boolean;
+  prices: Array<{ variantId: string; amount: number; catalogId: string }>;
 };
 
 type AccountMovement = {
@@ -232,6 +242,37 @@ function formatPrice(amount: number) {
   return amount.toLocaleString('es-AR', { currency: 'ARS', maximumFractionDigits: 0, style: 'currency' });
 }
 
+const ARGENTINA_TIMEZONE_OFFSET = '-03:00';
+
+function dateTimeInputValue(value: string) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date).reduce<Record<string, string>>((result, part) => {
+    if (part.type !== 'literal') result[part.type] = part.value;
+    return result;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+}
+
+function dateTimeInputToUtcIso(value: string) {
+  if (!value) return null;
+  const date = new Date(`${value}:00${ARGENTINA_TIMEZONE_OFFSET}`);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function basePrice(variant: CatalogProduct['variants'][number]) {
+  return variant.prices?.find((price) => price.catalogId === null)?.amount ?? null;
+}
+
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' });
 }
@@ -370,6 +411,7 @@ export function App() {
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [adminAccounts, setAdminAccounts] = useState<AdminCustomerAccount[]>([]);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
+  const [catalogs, setCatalogs] = useState<Catalog[]>([]);
   const [cart, setCart] = useState<CartItem[]>(() => JSON.parse(localStorage.getItem('cart') ?? '[]') as CartItem[]);
   const [isLoading, setIsLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
@@ -396,6 +438,7 @@ export function App() {
     setAdminUsers([]);
     setAdminAccounts([]);
     setPromotions([]);
+    setCatalogs([]);
   }, []);
 
   const expireSession = useCallback(() => {
@@ -452,13 +495,14 @@ export function App() {
 
   const loadAdminData = useCallback(async (accessToken = token) => {
     if (!accessToken || !isAdmin(user)) return;
-    const [adminProductsData, adminOrdersData, adminUsersData, deliveryMethodsData, promotionsData, adminAccountsData] = await Promise.all([
+    const [adminProductsData, adminOrdersData, adminUsersData, deliveryMethodsData, promotionsData, adminAccountsData, catalogsData] = await Promise.all([
       authenticatedRequest<{ products: CatalogProduct[] }>('/api/admin/products', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ orders: Order[] }>('/api/admin/orders', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ users: AdminUser[] }>('/api/admin/users', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ deliveryMethods: DeliveryMethod[] }>('/api/admin/delivery-methods', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ promotions: Promotion[] }>('/api/admin/promotions', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ accounts: AdminCustomerAccount[] }>('/api/admin/customer-accounts', { headers: { Authorization: `Bearer ${accessToken}` } }),
+      authenticatedRequest<{ catalogs: Catalog[] }>('/api/admin/catalogs', { headers: { Authorization: `Bearer ${accessToken}` } }),
     ]);
     setAdminProducts(adminProductsData.products);
     setOrders(adminOrdersData.orders);
@@ -466,6 +510,7 @@ export function App() {
     setDeliveryMethods(deliveryMethodsData.deliveryMethods);
     setPromotions(promotionsData.promotions);
     setAdminAccounts(adminAccountsData.accounts);
+    setCatalogs(catalogsData.catalogs);
   }, [authenticatedRequest, token, user]);
 
   useEffect(() => {
@@ -734,7 +779,7 @@ export function App() {
     body.append('sku', String(form.get('editSku') ?? ''));
     body.append('variantName', String(form.get('editVariantName') ?? 'Unidad'));
     body.append('stockQuantity', String(form.get('editStockQuantity') ?? 0));
-    body.append('price', String(form.get('editPrice') ?? 0));
+     body.append('price', String(form.get('editPrice') ?? 0));
     if (image instanceof File && image.size > 0) body.append('image', image);
     await authenticatedRequest(`/api/admin/products/${form.get('editProductId')}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body });
     setMessage('Producto actualizado');
@@ -872,18 +917,41 @@ export function App() {
         discountType: form.get('discountType'),
         value: Number(form.get('value') ?? 0),
         priority: Number(form.get('priority') ?? 0),
-        startsAt: form.get('startsAt') || null,
-        endsAt: form.get('endsAt') || null,
+        startsAt: dateTimeInputToUtcIso(String(form.get('startsAt') ?? '')),
+        endsAt: dateTimeInputToUtcIso(String(form.get('endsAt') ?? '')),
         isActive: form.get('isActive') === 'on',
         productId: scope === 'PRODUCT' ? targetId : null,
         variantId: scope === 'VARIANT' ? targetId : null,
         categoryId: scope === 'CATEGORY' ? targetId : null,
-        catalogId: null,
+        catalogId: scope === 'CATALOG' ? targetId : null,
       }),
     });
 
     event.currentTarget.reset();
     await loadCatalog();
+    await loadAdminData();
+  }
+
+  async function upsertCatalog(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const id = String(form.get('catalogId') ?? '');
+    await authenticatedRequest(`/api/admin/catalogs${id ? `/${id}` : ''}`, {
+      method: id ? 'PATCH' : 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ name: form.get('catalogName'), startsAt: dateTimeInputToUtcIso(String(form.get('catalogStartsAt') ?? '')), endsAt: dateTimeInputToUtcIso(String(form.get('catalogEndsAt') ?? '')), isActive: form.get('catalogIsActive') === 'on' }),
+    });
+    setMessage(id ? 'Catalogo actualizado' : 'Catalogo creado');
+    await loadAdminData();
+  }
+
+  async function updateCatalogPrices(catalogId: string, prices: Array<{ variantId: string; amount: number | null }>) {
+    await authenticatedRequest(`/api/admin/catalogs/${catalogId}/prices`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ prices }),
+    });
+     setMessage(prices.some((price) => price.amount === null) ? 'Precios del catalogo actualizados; se quitaron los overrides vacios.' : 'Precios del catalogo actualizados');
     await loadAdminData();
   }
 
@@ -896,7 +964,7 @@ export function App() {
     if (path === '/mis-pedidos') return <OrdersPage orders={orders} user={user} navigate={navigate} onCancelOrder={cancelOrder} error={error} />;
     if (path === '/cuenta-corriente') return <CustomerAccountPage user={user} account={account} movements={accountMovements} navigate={navigate} />;
     if (path === '/cuenta') return <AccountPage user={user} onLogout={logout} navigate={navigate} />;
-    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} accounts={adminAccounts} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onReversePayment={reverseOrderPayment} onSendPaymentReceipt={sendPaymentReceipt} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} />;
+    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} catalogs={catalogs} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} accounts={adminAccounts} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onReversePayment={reverseOrderPayment} onSendPaymentReceipt={sendPaymentReceipt} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} onUpsertCatalog={upsertCatalog} onUpdateCatalogPrices={updateCatalogPrices} />;
     return <HomePage products={featuredProducts} onAdd={addToCart} navigate={navigate} />;
   }
 
@@ -1197,6 +1265,7 @@ type AdminPageProps = {
   path: string;
   products: CatalogProduct[];
   categories: Category[];
+  catalogs: Catalog[];
   deliveryMethods: DeliveryMethod[];
   orders: Order[];
   users: AdminUser[];
@@ -1217,6 +1286,8 @@ type AdminPageProps = {
   onSendPaymentReceipt: (id: string) => void | Promise<void>;
   onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onUpsertPromotion: AdminFormSubmit;
+  onUpsertCatalog: AdminFormSubmit;
+  onUpdateCatalogPrices: (catalogId: string, prices: Array<{ variantId: string; amount: number | null }>) => void | Promise<void>;
 };
 
 function AdminPage(props: AdminPageProps) {
@@ -1235,6 +1306,7 @@ function AdminPage(props: AdminPageProps) {
         <nav className="adminNav" aria-label="Administracion">
           {[
             ['/admin/productos', 'Productos'],
+            ['/admin/catalogos', 'Catalogos'],
             ['/admin/pedidos', 'Pedidos'],
             ['/admin/cuentas', 'Cuentas corrientes'],
             ['/admin/promociones', 'Promociones'],
@@ -1246,16 +1318,17 @@ function AdminPage(props: AdminPageProps) {
       <div className="adminWorkspace">
         {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} products={props.products} onRegisterPayment={props.onRegisterPayment} onReversePayment={props.onReversePayment} onSendPaymentReceipt={props.onSendPaymentReceipt} onUpdateOrder={props.onUpdateOrder} onUpdateOrderDetails={props.onUpdateOrderDetails} /> : null}
         {currentPath === '/admin/cuentas' ? <AccountsAdmin accounts={props.accounts} onCreateAccountAdjustment={props.onCreateAccountAdjustment} /> : null}
-        {currentPath === '/admin/promociones' ? <PromotionsAdmin categories={props.categories} products={props.products} promotions={props.promotions} onUpsertPromotion={props.onUpsertPromotion} /> : null}
+         {currentPath === '/admin/promociones' ? <PromotionsAdmin categories={props.categories} catalogs={props.catalogs} products={props.products} promotions={props.promotions} onUpsertPromotion={props.onUpsertPromotion} /> : null}
+         {currentPath === '/admin/catalogos' ? <CatalogsAdmin catalogs={props.catalogs} products={props.products} onUpsertCatalog={props.onUpsertCatalog} onUpdateCatalogPrices={props.onUpdateCatalogPrices} /> : null}
         {currentPath === '/admin/usuarios' ? <UserAdminModern users={props.users} onUpdateUser={props.onUpdateUser} /> : null}
         {currentPath === '/admin/configuracion' ? <SettingsAdmin deliveryMethods={props.deliveryMethods} onUpsertDeliveryMethod={props.onUpsertDeliveryMethod} /> : null}
-        {!['/admin/pedidos', '/admin/cuentas', '/admin/promociones', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
+         {!['/admin/pedidos', '/admin/cuentas', '/admin/promociones', '/admin/catalogos', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
       </div>
     </section>
   );
 }
 
-function PromotionsAdmin({ categories, products, promotions, onUpsertPromotion }: { categories: Category[]; products: CatalogProduct[]; promotions: Promotion[]; onUpsertPromotion: AdminFormSubmit }) {
+function PromotionsAdmin({ categories, catalogs, products, promotions, onUpsertPromotion }: { categories: Category[]; catalogs: Catalog[]; products: CatalogProduct[]; promotions: Promotion[]; onUpsertPromotion: AdminFormSubmit }) {
   const variantOptions = products.flatMap((product) => product.variants.map((variant) => ({ product, variant })));
   const [search, setSearch] = useState('');
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -1277,8 +1350,8 @@ function PromotionsAdmin({ categories, products, promotions, onUpsertPromotion }
         {promotions.length > 0 && filteredPromotions.length === 0 ? <p className="statusText">No encontramos promociones con ese filtro.</p> : null}
         {filteredPromotions.length > 0 ? <div className="adminTable">{filteredPromotions.map((promotion) => <button className="adminTableRow promotionTableRow" key={promotion.id} type="button" onClick={() => setSelectedPromotionId(promotion.id)}><span><strong>{promotion.name}</strong><small>{promotionTargetLabel(promotion, products, categories)}</small></span><span>{promotionScopeLabel(promotion.scope)}</span><span>{promotionDiscountLabel(promotion)}</span><span className={promotion.isActive ? 'pill ok' : 'pill muted'}>{promotion.isActive ? 'Activa' : 'Pausada'}</span><span>Prioridad {promotion.priority}</span></button>)}</div> : null}
       </section>
-      {isCreateOpen ? <PromotionModal categories={categories} products={products} variantOptions={variantOptions} onClose={() => setIsCreateOpen(false)} onUpsertPromotion={onUpsertPromotion} /> : null}
-      {selectedPromotion ? <PromotionModal categories={categories} products={products} promotion={selectedPromotion} variantOptions={variantOptions} onClose={() => setSelectedPromotionId('')} onUpsertPromotion={onUpsertPromotion} /> : null}
+       {isCreateOpen ? <PromotionModal categories={categories} catalogs={catalogs} products={products} variantOptions={variantOptions} onClose={() => setIsCreateOpen(false)} onUpsertPromotion={onUpsertPromotion} /> : null}
+       {selectedPromotion ? <PromotionModal categories={categories} catalogs={catalogs} products={products} promotion={selectedPromotion} variantOptions={variantOptions} onClose={() => setSelectedPromotionId('')} onUpsertPromotion={onUpsertPromotion} /> : null}
     </section>
   );
 }
@@ -1306,15 +1379,17 @@ function promotionTargetLabel(promotion: Promotion, products: CatalogProduct[], 
   return 'Catalogo';
 }
 
-function PromotionModal({ categories, products, promotion, variantOptions, onClose, onUpsertPromotion }: { categories: Category[]; products: CatalogProduct[]; promotion?: Promotion; variantOptions: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number] }>; onClose: () => void; onUpsertPromotion: AdminFormSubmit }) {
+function PromotionModal({ categories, catalogs, products, promotion, variantOptions, onClose, onUpsertPromotion }: { categories: Category[]; catalogs: Catalog[]; products: CatalogProduct[]; promotion?: Promotion; variantOptions: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number] }>; onClose: () => void; onUpsertPromotion: AdminFormSubmit }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [scope, setScope] = useState<Promotion['scope']>(promotion?.scope ?? 'PRODUCT');
   const targetOptions = scope === 'CATEGORY'
     ? categories.map((category) => ({ id: category.id, label: category.name }))
     : scope === 'VARIANT'
       ? variantOptions.map(({ product, variant }) => ({ id: variant.id, label: `${product.name} · ${variant.name}` }))
-      : products.map((product) => ({ id: product.id, label: product.name }));
-  const currentTargetId = promotion?.productId ?? promotion?.variantId ?? promotion?.categoryId ?? '';
+      : scope === 'CATALOG'
+        ? catalogs.map((catalog) => ({ id: catalog.id, label: catalog.name }))
+        : products.map((product) => ({ id: product.id, label: product.name }));
+  const currentTargetId = promotion?.productId ?? promotion?.variantId ?? promotion?.categoryId ?? promotion?.catalogId ?? '';
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -1332,15 +1407,81 @@ function PromotionModal({ categories, products, promotion, variantOptions, onClo
         <input name="promotionId" type="hidden" value={promotion?.id ?? ''} />
         <div className="modalFields">
           <label>Nombre<input name="name" defaultValue={promotion?.name ?? ''} required /></label>
-          <div className="formRow"><label>Alcance<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as Promotion['scope'])}><option value="PRODUCT">Producto</option><option value="VARIANT">Variante</option><option value="CATEGORY">Categoria</option></select></label><label>Objetivo<select name="targetId" defaultValue={currentTargetId} required>{targetOptions.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}</select></label></div>
+           <div className="formRow"><label>Alcance<select name="scope" value={scope} onChange={(event) => setScope(event.target.value as Promotion['scope'])}><option value="PRODUCT">Producto</option><option value="VARIANT">Variante</option><option value="CATEGORY">Categoria</option><option value="CATALOG">Catalogo / campana</option></select></label><label>Objetivo<select key={scope} name="targetId" defaultValue={scope === promotion?.scope ? currentTargetId : ''} required><option value="" disabled>Selecciona un objetivo</option>{targetOptions.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}</select></label></div>
           <div className="formRow"><label>Tipo<select name="discountType" defaultValue={promotion?.discountType ?? 'PERCENTAGE'}><option value="PERCENTAGE">Porcentaje</option><option value="FIXED_AMOUNT">Monto fijo</option><option value="FIXED_PRICE">Precio final</option></select></label><label>Valor<input name="value" type="number" min="0.01" step="0.01" defaultValue={promotion?.value ?? ''} required /></label></div>
           <div className="formRow"><label>Prioridad<input name="priority" type="number" min="0" defaultValue={promotion?.priority ?? 0} /></label><label className="checkboxLabel"><input name="isActive" type="checkbox" defaultChecked={promotion?.isActive ?? true} />Activa</label></div>
-          <div className="formRow"><label>Desde<input name="startsAt" type="datetime-local" defaultValue={promotion?.startsAt ? promotion.startsAt.slice(0, 16) : ''} /></label><label>Hasta<input name="endsAt" type="datetime-local" defaultValue={promotion?.endsAt ? promotion.endsAt.slice(0, 16) : ''} /></label></div>
+           <div className="formRow"><label>Desde<input name="startsAt" type="datetime-local" defaultValue={dateTimeInputValue(promotion?.startsAt ?? '')} /></label><label>Hasta<input name="endsAt" type="datetime-local" defaultValue={dateTimeInputValue(promotion?.endsAt ?? '')} /></label></div>
         </div>
         <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="submit">Guardar cambios</button></div>
       </form>
     </div>
   );
+}
+
+function catalogDateInput(value: string) {
+  return dateTimeInputValue(value);
+}
+
+function CatalogsAdmin({ catalogs, products, onUpsertCatalog, onUpdateCatalogPrices }: { catalogs: Catalog[]; products: CatalogProduct[]; onUpsertCatalog: AdminFormSubmit; onUpdateCatalogPrices: (catalogId: string, prices: Array<{ variantId: string; amount: number | null }>) => void | Promise<void> }) {
+  const [search, setSearch] = useState('');
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [selectedCatalogId, setSelectedCatalogId] = useState('');
+  const [isPricesOpen, setIsPricesOpen] = useState(false);
+  const normalized = search.trim().toLowerCase();
+  const filtered = normalized ? catalogs.filter((catalog) => [catalog.name, catalog.isActive ? 'activo' : 'pausado'].some((value) => value.toLowerCase().includes(normalized))) : catalogs;
+  const selected = catalogs.find((catalog) => catalog.id === selectedCatalogId);
+
+  return <section className="adminPage">
+    <div className="adminPageHeader"><div><p className="eyebrow">Catalogos y campanas</p><h2>Precios por temporada.</h2><p>Administra la vigencia de cada catalogo y sus precios especiales por variante.</p></div><div className="adminStats"><span>{catalogs.length} catalogos</span><span>{catalogs.filter((catalog) => catalog.isActive).length} activos</span></div></div>
+    <section className="adminCard productListCard">
+      <div className="cardHeader productToolbar"><div><h3>Todos los catalogos</h3><span>{filtered.length} de {catalogs.length} registros</span></div><button className="primary" type="button" onClick={() => setIsCreateOpen(true)}>Nuevo catalogo</button></div>
+      <input className="searchInput adminSearch" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filtrar por nombre o estado" />
+      {catalogs.length === 0 ? <p className="statusText">Todavia no hay catalogos cargados.</p> : null}
+      {catalogs.length > 0 && filtered.length === 0 ? <p className="statusText">No encontramos catalogos con ese filtro.</p> : null}
+      {filtered.length > 0 ? <div className="adminTable">{filtered.map((catalog) => <button className="adminTableRow catalogTableRow" key={catalog.id} type="button" onClick={() => setSelectedCatalogId(catalog.id)}><span><strong>{catalog.name}</strong><small>{catalogDateInput(catalog.startsAt)} a {catalogDateInput(catalog.endsAt)}</small></span><span>{catalog.prices.length} precios</span><span className={catalog.isActive ? 'pill ok' : 'pill muted'}>{catalog.isActive ? 'Activo' : 'Pausado'}</span><span>Gestionar</span></button>)}</div> : null}
+    </section>
+    {isCreateOpen ? <CatalogModal onClose={() => setIsCreateOpen(false)} onUpsertCatalog={onUpsertCatalog} /> : null}
+    {selected ? <CatalogModal catalog={selected} onClose={() => { setSelectedCatalogId(''); setIsPricesOpen(false); }} onOpenPrices={() => setIsPricesOpen(true)} onUpsertCatalog={onUpsertCatalog} /> : null}
+    {selected && isPricesOpen ? <CatalogPricesModal catalog={selected} products={products} onClose={() => setIsPricesOpen(false)} onUpdateCatalogPrices={onUpdateCatalogPrices} /> : null}
+  </section>;
+}
+
+function CatalogModal({ catalog, onClose, onOpenPrices, onUpsertCatalog }: { catalog?: Catalog; onClose: () => void; onOpenPrices?: () => void; onUpsertCatalog: AdminFormSubmit }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  useEffect(() => { closeButtonRef.current?.focus(); }, []);
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setSubmitError(null); try { await onUpsertCatalog(event); onClose(); } catch (error) { setSubmitError(error instanceof Error ? error.message : 'No se pudo guardar el catalogo'); } }
+  return <div className="modalBackdrop" role="presentation" onMouseDown={onClose}><form className="adminForm productModal catalogModal" aria-labelledby="catalogModalTitle" aria-modal="true" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} onSubmit={submit} role="dialog">
+    <div className="modalHeader"><div><p className="eyebrow">{catalog ? 'Detalle de catalogo' : 'Nuevo catalogo'}</p><h3 id="catalogModalTitle">{catalog?.name ?? 'Crear catalogo o campana'}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
+    <input name="catalogId" type="hidden" value={catalog?.id ?? ''} /><div className="modalFields"><label>Nombre<input name="catalogName" defaultValue={catalog?.name ?? ''} required /></label><div className="formRow"><label>Desde<input name="catalogStartsAt" type="datetime-local" defaultValue={catalogDateInput(catalog?.startsAt ?? '')} required /></label><label>Hasta<input name="catalogEndsAt" type="datetime-local" defaultValue={catalogDateInput(catalog?.endsAt ?? '')} required /></label></div><label className="checkboxLabel"><input name="catalogIsActive" type="checkbox" defaultChecked={catalog?.isActive ?? true} />Catalogo activo</label>{catalog ? <p className="statusText compactStatus">Para desactivar una campana, desmarca “Catalogo activo”. La API no ofrece borrado necesario para esta pantalla.</p> : null}{submitError ? <p className="statusText errorText">{submitError}</p> : null}</div>
+    <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button>{onOpenPrices ? <button className="secondaryButton" type="button" onClick={onOpenPrices}>Editar precios</button> : null}<button type="submit">Guardar catalogo</button></div>
+  </form></div>;
+}
+
+function CatalogPricesModal({ catalog, products, onClose, onUpdateCatalogPrices }: { catalog: Catalog; products: CatalogProduct[]; onClose: () => void; onUpdateCatalogPrices: (catalogId: string, prices: Array<{ variantId: string; amount: number | null }>) => void | Promise<void> }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const variants = products.flatMap((product) => product.variants.map((variant) => ({ product, variant })));
+  const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(catalog.prices.map((price) => [price.variantId, String(price.amount)])));
+  const [saveError, setSaveError] = useState<string | null>(null);
+  useEffect(() => { closeButtonRef.current?.focus(); }, []);
+  async function save() {
+    setSaveError(null);
+    const prices = Object.entries(values).map(([variantId, amount]) => {
+      if (amount.trim() === '') {
+        return catalog.prices.some((price) => price.variantId === variantId) ? { variantId, amount: null } : null;
+      }
+      const parsedAmount = Number(amount);
+      return Number.isFinite(parsedAmount) && parsedAmount > 0 ? { variantId, amount: parsedAmount } : null;
+    }).filter((price): price is { variantId: string; amount: number | null } => price !== null);
+    if (prices.length === 0) { setSaveError('Ingresa al menos un precio valido.'); return; }
+    try { await onUpdateCatalogPrices(catalog.id, prices); onClose(); } catch (error) { setSaveError(error instanceof Error ? error.message : 'No se pudieron guardar los precios'); }
+  }
+  return <div className="modalBackdrop" role="presentation" onMouseDown={onClose}><div className="adminForm productModal catalogPricesModal" aria-labelledby="catalogPricesTitle" aria-modal="true" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} role="dialog">
+    <div className="modalHeader"><div><p className="eyebrow">Precios del catalogo</p><h3 id="catalogPricesTitle">{catalog.name}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
+     <p className="statusText compactStatus">Deja vacio un precio existente para quitar su override y volver al precio base. Los campos vacios sin override no se envian.</p>
+    <div className="catalogPriceList">{variants.length === 0 ? <p className="statusText">No hay variantes disponibles para configurar.</p> : variants.map(({ product, variant }) => <label className="catalogPriceRow" key={variant.id}><span><strong>{product.name}</strong><small>{variant.name} · {variant.sku}</small></span><input aria-label={`Precio ${product.name} ${variant.name}`} type="number" min="0.01" step="0.01" value={values[variant.id] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [variant.id]: event.target.value }))} /></label>)}</div>
+    {saveError ? <p className="statusText errorText">{saveError}</p> : null}<div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="button" onClick={() => void save()}>Guardar precios</button></div>
+  </div></div>;
 }
 
 function ProductAdminModern({ products, categories, selectedProduct, selectedProductId, setSelectedProductId, onCreateCategory, onCreateProduct, onUpdateProduct }: AdminPageProps) {
@@ -1374,7 +1515,8 @@ function ProductAdminModern({ products, categories, selectedProduct, selectedPro
         {products.length > 0 && filteredProducts.length === 0 ? <p className="statusText">No encontramos productos con ese filtro.</p> : null}
         {filteredProducts.length > 0 ? <div className="adminTable">{filteredProducts.map((product) => {
           const variant = product.variants[0];
-          return <button className="adminTableRow" key={product.id} type="button" onClick={() => openProduct(product.id)}><span><strong>{product.name}</strong><small>{product.category?.name ?? product.line ?? 'Sin categoria'}</small></span><span>{variant?.sku ?? 'Sin SKU'}</span><span>{variant?.currentPrice ? formatPrice(variant.currentPrice.amount) : 'Sin precio'}</span><span className={product.isActive ? 'pill ok' : 'pill muted'}>{product.isActive ? 'Activo' : 'Pausado'}</span><span>{variant?.availableStock ?? 0}/{variant?.stockQuantity ?? 0} u.</span></button>;
+           const price = variant ? basePrice(variant) : null;
+           return <button className="adminTableRow" key={product.id} type="button" onClick={() => openProduct(product.id)}><span><strong>{product.name}</strong><small>{product.category?.name ?? product.line ?? 'Sin categoria'}</small></span><span>{variant?.sku ?? 'Sin SKU'}</span><span>{price !== null ? formatPrice(price) : 'Sin precio'}</span><span className={product.isActive ? 'pill ok' : 'pill muted'}>{product.isActive ? 'Activo' : 'Pausado'}</span><span>{variant?.availableStock ?? 0}/{variant?.stockQuantity ?? 0} u.</span></button>;
         })}</div> : null}
       </section>
       {isCreateOpen ? <CreateProductModal categories={categories} onClose={() => setIsCreateOpen(false)} onCreateCategory={onCreateCategory} onCreateProduct={onCreateProduct} /> : null}
@@ -1427,7 +1569,7 @@ function ProductModal({ product, categories, selectedProductId, onClose, onUpdat
       <form aria-labelledby="productModalTitle" aria-modal="true" className="adminForm productModal" key={selectedProductId} onKeyDown={(event) => handleModalKeyDown(event, onClose)} onSubmit={submitProduct} onMouseDown={(event) => event.stopPropagation()} role="dialog">
         <div className="modalHeader"><div><p className="eyebrow">Detalle de producto</p><h3 id="productModalTitle">{product.name}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
         <div className="modalBody">
-          <div className="modalPreview">{image ? <img src={imageSource(image.url)} alt={image.altText ?? product.name} /> : <span>Sin imagen</span>}<p>{product.description || 'Sin descripcion cargada.'}</p><div className="adminStats compact"><span>{variant?.currentPrice ? formatPrice(variant.currentPrice.amount) : 'Sin precio'}</span><span>{variant?.availableStock ?? 0} disponibles</span><span>{variant?.reservedQuantity ?? 0} reservados</span></div></div>
+           <div className="modalPreview">{image ? <img src={imageSource(image.url)} alt={image.altText ?? product.name} /> : <span>Sin imagen</span>}<p>{product.description || 'Sin descripcion cargada.'}</p><div className="adminStats compact"><span>{variant && basePrice(variant) !== null ? formatPrice(basePrice(variant) as number) : 'Sin precio'}</span><span>{variant?.availableStock ?? 0} disponibles</span><span>{variant?.reservedQuantity ?? 0} reservados</span></div></div>
           <div className="modalFields">
             <input name="editProductId" type="hidden" value={product.id} />
             <label>Categoria<select name="editCategoryId" defaultValue={product.category?.id ?? ''}><option value="">Sin categoria</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
@@ -1437,7 +1579,7 @@ function ProductModal({ product, categories, selectedProductId, onClose, onUpdat
             <label>Descripcion<textarea name="editDescription" defaultValue={product.description ?? ''} rows={4} /></label>
             <label>Actualizar imagen<input name="editImage" type="file" accept="image/jpeg,image/png,image/webp" /></label>
             <div className="formRow"><label>SKU<input name="editSku" defaultValue={variant?.sku ?? ''} required /></label><label>Variante<input name="editVariantName" defaultValue={variant?.name ?? 'Unidad'} required /></label></div>
-            <div className="formRow"><label>Stock<input name="editStockQuantity" type="number" min="0" defaultValue={variant?.stockQuantity ?? 0} required /></label><label>Precio<input name="editPrice" type="number" min="0.01" step="0.01" defaultValue={variant?.currentPrice?.amount ?? 0} required /></label></div>
+             <div className="formRow"><label>Stock<input name="editStockQuantity" type="number" min="0" defaultValue={variant?.stockQuantity ?? 0} required /></label><label>Precio base<input name="editPrice" type="number" min="0.01" step="0.01" defaultValue={variant ? basePrice(variant) ?? 0 : 0} required /></label></div>
             <label className="checkboxLabel"><input name="editIsActive" type="checkbox" defaultChecked={product.isActive} />Producto activo</label>
           </div>
         </div>

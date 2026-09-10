@@ -22,7 +22,7 @@ export type AppliedPromotion = {
 };
 
 export function isPromotionActive(promotion: PromotionCandidate, now = new Date()) {
-  return promotion.isActive && (!promotion.startsAt || promotion.startsAt <= now) && (!promotion.endsAt || promotion.endsAt >= now);
+  return promotion.isActive && (!promotion.startsAt || promotion.startsAt <= now) && (!promotion.endsAt || now < promotion.endsAt);
 }
 
 export function promotionDiscount(basePrice: Prisma.Decimal, promotion: PromotionCandidate) {

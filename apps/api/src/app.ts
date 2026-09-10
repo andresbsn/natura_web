@@ -14,6 +14,7 @@ import { accountsRouter } from './modules/accounts/accounts.routes.js';
 import { authRouter } from './modules/auth/auth.routes.js';
 import { adminProductsRouter } from './modules/admin/admin.products.routes.js';
 import { adminPromotionsRouter } from './modules/admin/admin.promotions.routes.js';
+import { adminCatalogsRouter } from './modules/admin/admin.catalogs.routes.js';
 import { adminUsersRouter } from './modules/admin/admin.users.routes.js';
 import { catalogRouter } from './modules/catalog/catalog.routes.js';
 import { healthRouter } from './modules/health/health.routes.js';
@@ -58,6 +59,7 @@ export function createApp() {
   app.use('/api/admin', adminProductsRouter);
   app.use('/api/admin', adminOrdersRouter);
   app.use('/api/admin', adminPromotionsRouter);
+  app.use('/api/admin', adminCatalogsRouter);
   app.use('/api/admin', adminUsersRouter);
   app.use('/api/catalog', catalogRouter);
   app.use('/api/orders', ordersRouter);

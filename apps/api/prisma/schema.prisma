@@ -184,6 +184,10 @@ model Catalog {
 
   prices     Price[]
   promotions Promotion[]
+
+  /// PostgreSQL also enforces startsAt < endsAt and prevents overlapping
+  /// half-open [startsAt, endsAt) periods among active catalogs.
+  @@index([isActive, startsAt, endsAt])
 }
 
 model Price {
@@ -197,7 +201,10 @@ model Price {
   variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
   catalog Catalog?       @relation(fields: [catalogId], references: [id], onDelete: Cascade)
 
+  /// A null catalogId is the variant's base price. PostgreSQL additionally
+  /// enforces one base price per variant with a partial unique index.
   @@unique([variantId, catalogId])
+  @@index([catalogId, variantId])
 }
 
 model Promotion {

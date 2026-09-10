@@ -1,6 +1,6 @@
 import type { Prisma } from '@prisma/client';
 
-import { applyBestPromotion } from '../promotions/promotion-calculator.js';
+import { resolveEffectivePrice } from '../pricing/price-resolver.js';
 import { productInclude } from './product.queries.js';
 
 type ProductWithRelations = Prisma.ProductGetPayload<{ include: typeof productInclude }>;
@@ -28,18 +28,16 @@ function mapPrice(price: PriceWithCatalog) {
 }
 
 function mapCurrentPrice(variant: ProductWithRelations['variants'][number], product: ProductWithRelations) {
-  const price = variant.prices[0];
-  if (!price) return null;
-
-  const promotion = applyBestPromotion(price.amount, [
+  const resolved = resolveEffectivePrice(variant.prices, [
     ...variant.promotions,
     ...product.promotions,
     ...(product.category?.promotions ?? []),
-    ...(price.catalog?.promotions ?? []),
   ]);
+  if (!resolved) return null;
+  const { price, promotion } = resolved;
 
   return {
-    ...mapPrice(price),
+    ...mapPrice(price as PriceWithCatalog),
     amount: promotion ? decimalToNumber(promotion.finalPrice) : decimalToNumber(price.amount),
     originalAmount: decimalToNumber(price.amount),
     discountAmount: promotion ? decimalToNumber(promotion.discountAmount) : 0,
@@ -58,7 +56,7 @@ export function mapCategory(category: CategoryModel) {
   };
 }
 
-export function mapProduct(product: ProductWithRelations) {
+export function mapProduct(product: ProductWithRelations, includeHistoricalPrices = false, includeInactiveVariants = false) {
   return {
     id: product.id,
     name: product.name,
@@ -73,8 +71,9 @@ export function mapProduct(product: ProductWithRelations) {
       altText: image.altText,
       sortOrder: image.sortOrder,
     })),
-    variants: product.variants.map((variant) => {
+    variants: product.variants.filter((variant) => includeInactiveVariants || variant.isActive).map((variant) => {
       const reservedQuantity = variant.orderItems.reduce((total, item) => total + item.quantity, 0);
+      const currentPrice = mapCurrentPrice(variant, product);
 
       return {
         id: variant.id,
@@ -85,8 +84,10 @@ export function mapProduct(product: ProductWithRelations) {
         availableStock: Math.max(variant.stockQuantity - reservedQuantity, 0),
         reservedQuantity,
         isActive: variant.isActive,
-        prices: variant.prices.map(mapPrice),
-        currentPrice: mapCurrentPrice(variant, product),
+        prices: includeHistoricalPrices
+          ? variant.prices.map(mapPrice)
+          : variant.prices.filter((price) => price.id === currentPrice?.id).map(mapPrice),
+        currentPrice,
       };
     }),
     createdAt: product.createdAt,

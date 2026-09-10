@@ -66,7 +66,7 @@ ordersRouter.post('/', async (req, res, next) => {
         where: { id: { in: variantIds }, isActive: true, product: { isActive: true } },
         include: {
           product: { include: { category: { include: { promotions: true } }, promotions: true } },
-          prices: { orderBy: { createdAt: 'desc' }, take: 1, include: { catalog: { include: { promotions: true } } } },
+          prices: { orderBy: { createdAt: 'desc' }, include: { catalog: { include: { promotions: true } } } },
           promotions: true,
         },
       });
@@ -90,9 +90,7 @@ ordersRouter.post('/', async (req, res, next) => {
 
       const orderItems = data.items.map((item) => {
         const variant = variantsById.get(item.variantId);
-        const price = variant?.prices[0];
-
-        if (!variant || !price) {
+        if (!variant) {
           throw new AppError(400, 'Product is not available', 'PRODUCT_UNAVAILABLE');
         }
 
