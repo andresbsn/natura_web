@@ -1115,6 +1115,152 @@ button:disabled {
   align-self: start;
 }
 
+.paymentHistory {
+  border-top: 1px solid rgba(49, 93, 58, 0.12);
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.35rem;
+  padding-top: 1rem;
+}
+
+.paymentHistory h3 {
+  margin-bottom: 0;
+}
+
+.paymentHistoryRow {
+  align-items: center;
+  background: #f7f1e8;
+  border-radius: 0.9rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 0.75rem;
+}
+
+.paymentHistoryRow > span:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.paymentHistoryRow small {
+  color: #52624d;
+}
+
+.reversedPaymentText {
+  color: #8d3f26 !important;
+}
+
+.receiptActionsPanel {
+  align-self: start;
+}
+
+.receiptActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.paymentReceipt {
+  background: #fffaf2;
+  border: 1px solid rgba(49, 93, 58, 0.14);
+  border-radius: 1.2rem;
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 1rem;
+}
+
+.receiptHeader,
+.receiptTableHeader,
+.receiptTableRow,
+.receiptTotals {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.receiptHeader {
+  align-items: start;
+  border-bottom: 1px solid rgba(49, 93, 58, 0.12);
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-bottom: 0.9rem;
+}
+
+.receiptHeader h2,
+.receiptHeader p,
+.receiptCustomer strong,
+.receiptPayments h3,
+.receiptPayments p {
+  margin: 0;
+}
+
+.receiptHeader > div:last-child,
+.receiptTotals span {
+  color: #52624d;
+  display: grid;
+  gap: 0.2rem;
+  text-align: right;
+}
+
+.receiptCustomer {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.receiptCustomer span,
+.receiptTableHeader,
+.receiptPayments h3 {
+  color: #a45d2d;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.receiptTable {
+  border: 1px solid rgba(49, 93, 58, 0.1);
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+.receiptTableHeader,
+.receiptTableRow {
+  grid-template-columns: minmax(0, 1fr) 4rem 8rem;
+  padding: 0.75rem;
+}
+
+.receiptTableHeader {
+  background: #f7f1e8;
+}
+
+.receiptTableRow + .receiptTableRow {
+  border-top: 1px solid rgba(49, 93, 58, 0.1);
+}
+
+.receiptTableRow small {
+  color: #52624d;
+  display: block;
+}
+
+.receiptTableHeader span:nth-child(n+2),
+.receiptTableRow span:nth-child(n+2) {
+  text-align: right;
+}
+
+.receiptTotals {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.receiptTotals strong,
+.receiptHeader strong,
+.receiptCustomer strong,
+.receiptPayments strong {
+  color: #315d3a;
+}
+
+.receiptPayments {
+  display: grid;
+  gap: 0.4rem;
+}
+
 .addItemPanel {
   border-top: 1px solid rgba(49, 93, 58, 0.12);
   margin-top: 0.25rem;
@@ -1316,6 +1462,8 @@ button:disabled {
   .orderFilters,
   .orderModalSummary,
   .orderModalGrid,
+  .receiptHeader,
+  .receiptTotals,
   .modernOrder,
   .accountMovementRow,
   .cartLayout,
@@ -1362,6 +1510,16 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .receiptHeader > div:last-child,
+  .receiptTotals span {
+    text-align: left;
+  }
+
+  .receiptTableHeader,
+  .receiptTableRow {
+    grid-template-columns: minmax(0, 1fr) 3rem 6.5rem;
+  }
+
   .itemEditActions {
     justify-content: flex-start;
   }
@@ -1383,5 +1541,48 @@ button:disabled {
 
   .appAlert {
     width: auto;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+
+  .modalBackdrop,
+  .productModal,
+  .orderModal {
+    align-items: stretch;
+    background: #fff;
+    display: block;
+    height: auto;
+    inset: 0 auto auto 0;
+    max-height: none;
+    max-width: none;
+    overflow: visible;
+    padding: 0;
+    position: fixed;
+    width: 100%;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  .paymentReceipt,
+  .paymentReceipt * {
+    visibility: visible;
+  }
+
+  .paymentReceipt {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    color: #111;
+    margin: 0;
+    padding: 0;
+    position: fixed;
+    inset: 0 auto auto 0;
+    width: 100%;
   }
 }

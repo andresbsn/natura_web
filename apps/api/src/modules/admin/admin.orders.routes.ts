@@ -1,4 +1,4 @@
-import { CustomerAccountMovementType, OrderStatus, PaymentStatus, Prisma } from '@prisma/client';
+import { CustomerAccountMovementType, OrderStatus, Prisma } from '@prisma/client';
 import { Router } from 'express';
 import { z } from 'zod';
 
@@ -6,7 +6,7 @@ import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
 import { createLedgerMovement } from '../accounts/account-ledger.js';
 import { requireAuth, requireRole } from '../auth/auth.middleware.js';
-import { sendOrderStatusEmail } from '../notifications/order-email-notifications.js';
+import { sendOrderStatusEmail, sendPaymentReceiptEmail } from '../notifications/order-email-notifications.js';
 import { mapOrder, orderInclude } from '../orders/order.mappers.js';
 import { RESERVED_ORDER_STATUSES, assertAdminOrderStatusTransition, orderItemQuantityDiffs, orderStockAction, recalculateOrderItems } from '../orders/order-stock.js';
 
@@ -16,7 +16,6 @@ adminOrdersRouter.use(requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'));
 
 const orderUpdateSchema = z.object({
   status: z.nativeEnum(OrderStatus).optional(),
-  paymentStatus: z.nativeEnum(PaymentStatus).optional(),
   deliveryMethodId: z.string().uuid().nullable().optional(),
   deliveryAddress: z.string().max(300).nullable().optional(),
   deliveryNotes: z.string().max(600).nullable().optional(),
@@ -27,6 +26,10 @@ const paymentSchema = z.object({
   amount: z.number().positive(),
   method: z.enum(['efectivo', 'transferencia', 'debito', 'credito']),
   notes: z.string().max(600).optional(),
+});
+
+const paymentReversalSchema = z.object({
+  reason: z.string().trim().min(3).max(600),
 });
 
 const deliveryMethodSchema = z.object({
@@ -219,15 +222,12 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
       }
 
       const nextTotal = nextSubtotal.add(deliveryCost);
-      const shouldRecalculatePaymentStatus = data.paymentStatus === undefined && (data.items !== undefined || data.deliveryMethodId !== undefined);
-      const paidTotal = existing.payments.reduce((total, payment) => total.add(payment.amount), new Prisma.Decimal(0));
-      const nextPaymentStatus = shouldRecalculatePaymentStatus
-        ? paidTotal.equals(0)
-          ? 'UNPAID'
-          : paidTotal.greaterThanOrEqualTo(nextTotal)
-            ? 'PAID'
-            : 'PARTIALLY_PAID'
-        : data.paymentStatus;
+      const paidTotal = existing.payments.filter((payment) => payment.status !== 'REFUNDED').reduce((total, payment) => total.add(payment.amount), new Prisma.Decimal(0));
+      const nextPaymentStatus = paidTotal.equals(0)
+        ? existing.payments.length > 0 && existing.payments.every((payment) => payment.status === 'REFUNDED') ? 'REFUNDED' : 'UNPAID'
+        : paidTotal.greaterThanOrEqualTo(nextTotal)
+          ? 'PAID'
+          : 'PARTIALLY_PAID';
 
       const updated = await tx.order.update({
         where: { id },
@@ -346,7 +346,7 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
         throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
       }
 
-      const paidTotal = await tx.payment.aggregate({ where: { orderId: id }, _sum: { amount: true } });
+      const paidTotal = await tx.payment.aggregate({ where: { orderId: id, status: { not: 'REFUNDED' } }, _sum: { amount: true } });
       const nextPaidTotal = (paidTotal._sum.amount ?? new Prisma.Decimal(0)).add(data.amount);
       const nextStatus = nextPaidTotal.greaterThanOrEqualTo(existing.total) ? 'PAID' : 'PARTIALLY_PAID';
       const payment = await tx.payment.create({
@@ -394,6 +394,99 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
     });
 
     res.status(201).json({ order: mapOrder(order) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminOrdersRouter.post('/orders/:id/payments/:paymentId/reverse', async (req, res, next) => {
+  try {
+    const orderId = z.string().uuid().parse(req.params.id);
+    const paymentId = z.string().uuid().parse(req.params.paymentId);
+    const data = paymentReversalSchema.parse(req.body);
+
+    const order = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${paymentId} FOR UPDATE`;
+      const payment = await tx.payment.findFirst({ where: { id: paymentId, orderId } });
+
+      if (!payment) {
+        throw new AppError(404, 'Payment not found', 'PAYMENT_NOT_FOUND');
+      }
+
+      if (payment.status === 'REFUNDED' || payment.reversedAt) {
+        throw new AppError(409, 'Payment has already been reversed', 'PAYMENT_ALREADY_REVERSED');
+      }
+
+      const existingOrder = await tx.order.findUnique({ where: { id: orderId } });
+      if (!existingOrder) {
+        throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+      }
+
+      const reversedAt = new Date();
+      const reversedPayment = await tx.payment.update({
+        where: { id: paymentId },
+        data: { status: 'REFUNDED', reversedAt, reversedById: req.user!.id, reversalReason: data.reason },
+      });
+
+      await createLedgerMovement(tx, {
+        customerId: existingOrder.customerId,
+        orderId,
+        paymentId,
+        actorId: req.user!.id,
+        type: CustomerAccountMovementType.PAYMENT_REFUND_DEBIT,
+        direction: 'DEBIT',
+        amount: payment.amount,
+        description: `Reverso del pago ${paymentId.slice(0, 8)} del pedido ${orderId.slice(0, 8)}`,
+        idempotencyKey: `payment:${paymentId}:refund`,
+        metadata: auditJson({ source: 'admin_payment_reversal', reason: data.reason }),
+        occurredAt: reversedAt,
+      });
+
+      const remainingPayments = await tx.payment.findMany({ where: { orderId, status: { not: 'REFUNDED' } }, select: { amount: true } });
+      const remainingPaidTotal = remainingPayments.reduce((total, candidate) => total.add(candidate.amount), new Prisma.Decimal(0));
+      const nextPaymentStatus = remainingPayments.length === 0
+        ? 'REFUNDED'
+        : remainingPaidTotal.greaterThanOrEqualTo(existingOrder.total)
+          ? 'PAID'
+          : 'PARTIALLY_PAID';
+      const updatedOrder = await tx.order.update({ where: { id: orderId }, data: { paymentStatus: nextPaymentStatus }, include: orderInclude });
+
+      await tx.auditLog.create({
+        data: {
+          actorId: req.user!.id,
+          entityType: 'Payment',
+          entityId: paymentId,
+          action: 'REVERSE',
+          before: auditJson(payment),
+          after: auditJson({ payment: reversedPayment, orderPaymentStatus: nextPaymentStatus, reason: data.reason }),
+        },
+      });
+
+      return updatedOrder;
+    });
+
+    res.json({ order: mapOrder(order) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+adminOrdersRouter.post('/orders/:id/payment-receipt-email', async (req, res, next) => {
+  try {
+    const id = z.string().uuid().parse(req.params.id);
+    const order = await prisma.order.findUnique({ where: { id }, include: orderInclude });
+
+    if (!order) {
+      throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+    }
+
+    if (order.payments.length === 0) {
+      throw new AppError(409, 'Payment receipt requires at least one registered payment', 'NO_PAYMENTS_FOR_RECEIPT');
+    }
+
+    const result = await sendPaymentReceiptEmail({ ...order, orderId: order.id }, req.user!.id);
+    res.json({ notification: result });
   } catch (error) {
     next(error);
   }

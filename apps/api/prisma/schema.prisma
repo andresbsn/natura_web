@@ -80,6 +80,7 @@ model User {
   carts              Cart[]
   orders             Order[]             @relation("CustomerOrders")
   paymentsRegistered Payment[]           @relation("PaymentRegisteredBy")
+  paymentsReversed   Payment[]           @relation("PaymentReversedBy")
   auditLogs          AuditLog[]          @relation("AuditActor")
   refreshTokens      RefreshToken[]
   emailTokens        EmailVerificationToken[]
@@ -315,11 +316,17 @@ model Payment {
   method         String?
   notes          String?
   paidAt         DateTime?
+  reversedAt     DateTime?
+  reversedById   String?
+  reversalReason String?
   createdAt      DateTime      @default(now())
 
   order        Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
   registeredBy User  @relation("PaymentRegisteredBy", fields: [registeredById], references: [id], onDelete: Restrict)
+  reversedBy   User? @relation("PaymentReversedBy", fields: [reversedById], references: [id], onDelete: Restrict)
   accountMovements CustomerAccountMovement[]
+
+  @@index([reversedById])
 }
 
 model CustomerAccount {

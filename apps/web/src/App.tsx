@@ -54,7 +54,7 @@ type Order = {
   deliveryCost: number;
   total: number;
   items: Array<{ id: string; variantId: string; productName: string; variantName: string; quantity: number; unitPrice: number; lineTotal: number }>;
-  payments: Array<{ id: string; amount: number; status: string; method: string | null; notes: string | null; paidAt: string | null; createdAt: string }>;
+  payments: Array<{ id: string; amount: number; status: string; method: string | null; notes: string | null; paidAt: string | null; reversedAt: string | null; reversedById: string | null; reversalReason: string | null; createdAt: string }>;
   createdAt: string;
 };
 
@@ -230,6 +230,18 @@ function imageSource(url: string) {
 
 function formatPrice(amount: number) {
   return amount.toLocaleString('es-AR', { currency: 'ARS', maximumFractionDigits: 0, style: 'currency' });
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function paymentMethodLabel(method: string | null) {
+  return PAYMENT_METHOD_OPTIONS.find((option) => option.value === method)?.label ?? 'No informado';
+}
+
+function effectivePaymentAmount(payments: Order['payments']) {
+  return payments.filter((payment) => payment.status !== 'REFUNDED').reduce((total, payment) => total + payment.amount, 0);
 }
 
 function accountMovementLabel(type: string) {
@@ -748,11 +760,11 @@ export function App() {
     await loadAccount();
   }
 
-  async function updateAdminOrder(id: string, status: string, paymentStatus: string) {
+  async function updateAdminOrder(id: string, status: string) {
     await authenticatedRequest(`/api/admin/orders/${id}`, {
       method: 'PATCH',
       headers: { Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ status, paymentStatus }),
+      body: JSON.stringify({ status }),
     });
     await loadAdminData();
     await loadAccount();
@@ -815,6 +827,35 @@ export function App() {
     await loadAccount();
   }
 
+  async function sendPaymentReceipt(id: string) {
+    try {
+      const data = await authenticatedRequest<{ notification: { sent: boolean; reason?: string } }>(`/api/admin/orders/${id}/payment-receipt-email`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const fallbackMessage = data.notification.reason === 'SMTP_SEND_FAILED'
+        ? 'No se pudo enviar el comprobante por un error del servicio SMTP.'
+        : 'Comprobante preparado, pero SMTP no esta configurado para enviarlo.';
+      setMessage(data.notification.sent ? 'Comprobante enviado por email al cliente.' : fallbackMessage);
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'NO_PAYMENTS_FOR_RECEIPT') {
+        throw new Error('El pedido todavia no tiene pagos registrados para emitir un comprobante.');
+      }
+      throw error;
+    }
+  }
+
+  async function reverseOrderPayment(orderId: string, paymentId: string, reason: string) {
+    await authenticatedRequest(`/api/admin/orders/${orderId}/payments/${paymentId}/reverse`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ reason }),
+    });
+    setMessage('Pago reversado y movimiento de cuenta registrado.');
+    await loadAdminData();
+    await loadAccount();
+  }
+
   async function upsertPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -855,7 +896,7 @@ export function App() {
     if (path === '/mis-pedidos') return <OrdersPage orders={orders} user={user} navigate={navigate} onCancelOrder={cancelOrder} error={error} />;
     if (path === '/cuenta-corriente') return <CustomerAccountPage user={user} account={account} movements={accountMovements} navigate={navigate} />;
     if (path === '/cuenta') return <AccountPage user={user} onLogout={logout} navigate={navigate} />;
-    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} accounts={adminAccounts} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} />;
+    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} accounts={adminAccounts} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onReversePayment={reverseOrderPayment} onSendPaymentReceipt={sendPaymentReceipt} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} />;
     return <HomePage products={featuredProducts} onAdd={addToCart} navigate={navigate} />;
   }
 
@@ -1167,11 +1208,13 @@ type AdminPageProps = {
   onCreateCategory: (event: FormEvent<HTMLFormElement>) => void;
   onCreateProduct: AdminFormSubmit;
   onUpdateProduct: AdminFormSubmit;
-  onUpdateOrder: (id: string, status: string, paymentStatus: string) => void | Promise<void>;
+  onUpdateOrder: (id: string, status: string) => void | Promise<void>;
   onUpdateOrderDetails: (id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) => void | Promise<void>;
   onUpdateUser: (id: string, isActive: boolean, password?: string) => void | Promise<void>;
   onUpsertDeliveryMethod: AdminFormSubmit;
   onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>;
+  onSendPaymentReceipt: (id: string) => void | Promise<void>;
   onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onUpsertPromotion: AdminFormSubmit;
 };
@@ -1201,7 +1244,7 @@ function AdminPage(props: AdminPageProps) {
         </nav>
       </aside>
       <div className="adminWorkspace">
-        {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} products={props.products} onRegisterPayment={props.onRegisterPayment} onUpdateOrder={props.onUpdateOrder} onUpdateOrderDetails={props.onUpdateOrderDetails} /> : null}
+        {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} products={props.products} onRegisterPayment={props.onRegisterPayment} onReversePayment={props.onReversePayment} onSendPaymentReceipt={props.onSendPaymentReceipt} onUpdateOrder={props.onUpdateOrder} onUpdateOrderDetails={props.onUpdateOrderDetails} /> : null}
         {currentPath === '/admin/cuentas' ? <AccountsAdmin accounts={props.accounts} onCreateAccountAdjustment={props.onCreateAccountAdjustment} /> : null}
         {currentPath === '/admin/promociones' ? <PromotionsAdmin categories={props.categories} products={props.products} promotions={props.promotions} onUpsertPromotion={props.onUpsertPromotion} /> : null}
         {currentPath === '/admin/usuarios' ? <UserAdminModern users={props.users} onUpdateUser={props.onUpdateUser} /> : null}
@@ -1404,7 +1447,7 @@ function ProductModal({ product, categories, selectedProductId, onClose, onUpdat
   );
 }
 
-function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetails, onRegisterPayment }: { orders: Order[]; products: CatalogProduct[]; onUpdateOrder: (id: string, status: string, paymentStatus: string) => void | Promise<void>; onUpdateOrderDetails: (id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void> }) {
+function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetails, onRegisterPayment, onReversePayment, onSendPaymentReceipt }: { orders: Order[]; products: CatalogProduct[]; onUpdateOrder: (id: string, status: string) => void | Promise<void>; onUpdateOrderDetails: (id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>; onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>; onSendPaymentReceipt: (id: string) => void | Promise<void> }) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [paymentFilter, setPaymentFilter] = useState('');
@@ -1452,11 +1495,11 @@ function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetail
         {orders.length === 0 ? <p className="statusText">Todavia no hay pedidos.</p> : null}
         {orders.length > 0 && filteredOrders.length === 0 ? <p className="statusText">No encontramos pedidos con esos filtros.</p> : null}
         {filteredOrders.length > 0 ? <div className="adminTable">{filteredOrders.map((order) => {
-          const paidAmount = order.payments.reduce((total, payment) => total + payment.amount, 0);
+          const paidAmount = effectivePaymentAmount(order.payments);
           return <button className="adminTableRow orderTableRow" key={order.id} type="button" onClick={() => setSelectedOrderId(order.id)}><span><strong>Pedido {order.id.slice(0, 8)}</strong><small>{order.customer.firstName} {order.customer.lastName} · {order.customer.email}</small></span><span>{order.items.length} items</span><span>{formatPrice(order.total)}</span><span className={`pill ${orderStatusTone(order.status)}`}>{orderStatusLabel(order.status)}</span><span className={`pill ${paymentStatusTone(order.paymentStatus)}`}>{paymentStatusLabel(order.paymentStatus)}</span><span>{formatPrice(paidAmount)} pagado</span></button>;
         })}</div> : null}
       </section>
-      {selectedOrder ? <OrderModal order={selectedOrder} variantOptions={variantOptions} onClose={() => setSelectedOrderId('')} onRegisterPayment={onRegisterPayment} onUpdateOrder={onUpdateOrder} onUpdateOrderItems={updateOrderItems} /> : null}
+      {selectedOrder ? <OrderModal order={selectedOrder} variantOptions={variantOptions} onClose={() => setSelectedOrderId('')} onRegisterPayment={onRegisterPayment} onReversePayment={onReversePayment} onSendPaymentReceipt={onSendPaymentReceipt} onUpdateOrder={onUpdateOrder} onUpdateOrderItems={updateOrderItems} /> : null}
     </section>
   );
 }
@@ -1508,16 +1551,16 @@ function adminOrderErrorMessage(error: unknown) {
   return 'No se pudo actualizar el pedido.';
 }
 
-function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrderItems, onRegisterPayment }: { order: Order; variantOptions: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number] }>; onClose: () => void; onUpdateOrder: (id: string, status: string, paymentStatus: string) => void | Promise<void>; onUpdateOrderItems: (order: Order, items: Array<{ variantId: string; quantity: number }>) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void> }) {
+function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrderItems, onRegisterPayment, onReversePayment, onSendPaymentReceipt }: { order: Order; variantOptions: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number] }>; onClose: () => void; onUpdateOrder: (id: string, status: string) => void | Promise<void>; onUpdateOrderItems: (order: Order, items: Array<{ variantId: string; quantity: number }>) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>; onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>; onSendPaymentReceipt: (id: string) => void | Promise<void> }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [editingItemId, setEditingItemId] = useState('');
   const [quantityDraft, setQuantityDraft] = useState(1);
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [orderStatus, setOrderStatus] = useState(order.status);
-  const [paymentStatus, setPaymentStatus] = useState(order.paymentStatus);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [isSendingReceipt, setIsSendingReceipt] = useState(false);
   const isEditable = ['PENDING', 'CONFIRMED', 'PREPARING'].includes(order.status);
-  const paidAmount = order.payments.reduce((total, payment) => total + payment.amount, 0);
+  const paidAmount = effectivePaymentAmount(order.payments);
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -1525,7 +1568,6 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
 
   useEffect(() => {
     setOrderStatus(order.status);
-    setPaymentStatus(order.paymentStatus);
   }, [order.id, order.paymentStatus, order.status]);
 
   function currentItems() {
@@ -1583,7 +1625,7 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
     if (isOrderStatusOptionDisabled(order.status, orderStatus)) return;
     setModalError(null);
     try {
-      await onUpdateOrder(order.id, orderStatus, paymentStatus);
+      await onUpdateOrder(order.id, orderStatus);
     } catch (error) {
       setModalError(adminOrderErrorMessage(error));
     }
@@ -1598,6 +1640,35 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
     }
   }
 
+  async function sendReceipt() {
+    setModalError(null);
+    setIsSendingReceipt(true);
+    try {
+      await onSendPaymentReceipt(order.id);
+    } catch (error) {
+      setModalError(adminOrderErrorMessage(error));
+    } finally {
+      setIsSendingReceipt(false);
+    }
+  }
+
+  async function reversePayment(payment: Order['payments'][number]) {
+    if (payment.status === 'REFUNDED') return;
+    if (!window.confirm(`¿Confirmas reversar el pago de ${formatPrice(payment.amount)}? Esta acción no se puede deshacer.`)) return;
+    const reason = window.prompt('Indica el motivo del reverso formal:')?.trim() ?? '';
+    if (reason.length < 3) {
+      setModalError('El motivo del reverso debe tener al menos 3 caracteres.');
+      return;
+    }
+
+    setModalError(null);
+    try {
+      await onReversePayment(order.id, payment.id, reason);
+    } catch (error) {
+      setModalError(adminOrderErrorMessage(error));
+    }
+  }
+
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
       <div aria-labelledby="orderModalTitle" aria-modal="true" className="productModal orderModal" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} role="dialog">
@@ -1607,15 +1678,15 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
           <article><span>Total</span><strong>{formatPrice(order.total)}</strong><small>Subtotal {formatPrice(order.subtotal)} · Entrega {formatPrice(order.deliveryCost)}</small></article>
           <article><span>Pagado</span><strong>{formatPrice(paidAmount)}</strong><small>{order.payments.length} pagos registrados</small></article>
         </div>
+        <PaymentReceipt order={order} paidAmount={paidAmount} />
         {modalError ? <p className="statusText errorText modalError">{modalError}</p> : null}
         <div className="orderModalGrid">
           <section className="adminForm orderStatusPanel">
             <h3>Estado del pedido</h3>
             <div className="formRow">
               <label>Pedido<select value={orderStatus} onChange={(event) => setOrderStatus(event.target.value)}><option value="PENDING" disabled={isOrderStatusOptionDisabled(order.status, 'PENDING')}>Pendiente</option><option value="CONFIRMED" disabled={isOrderStatusOptionDisabled(order.status, 'CONFIRMED')}>Confirmado</option><option value="PREPARING" disabled={isOrderStatusOptionDisabled(order.status, 'PREPARING')}>Preparando</option><option value="DELIVERED" disabled={isOrderStatusOptionDisabled(order.status, 'DELIVERED')}>Entregado</option><option value="CANCELLED" disabled={isOrderStatusOptionDisabled(order.status, 'CANCELLED')}>Cancelado</option></select></label>
-              <label>Pago<select value={paymentStatus} onChange={(event) => setPaymentStatus(event.target.value)}><option value="UNPAID">Sin pago</option><option value="PARTIALLY_PAID">Pago parcial</option><option value="PAID">Pagado</option><option value="REFUNDED">Reembolsado</option></select></label>
             </div>
-            <button className="primary compactButton" type="button" disabled={(orderStatus === order.status && paymentStatus === order.paymentStatus) || isOrderStatusOptionDisabled(order.status, orderStatus)} onClick={saveOrderStatus}>Guardar cambios</button>
+            <button className="primary compactButton" type="button" disabled={orderStatus === order.status || isOrderStatusOptionDisabled(order.status, orderStatus)} onClick={saveOrderStatus}>Guardar cambios</button>
             <div className="orderItemsPreview">{order.items.map((item) => <div className="orderItemRow" key={item.id}><div><span>{item.quantity} x {item.productName}</span><strong>{formatPrice(item.lineTotal)}</strong><small>{item.variantName}</small></div>{editingItemId === item.id ? <div className="itemEditActions"><input aria-label={`Cantidad de ${item.productName}`} type="number" min="1" max="99" value={quantityDraft} onChange={(event) => setQuantityDraft(Number(event.target.value))} /><button className="compactButton" type="button" onClick={() => saveItemQuantity(item)}>Guardar</button><button className="secondaryButton compactButton" type="button" onClick={() => setEditingItemId('')}>Cancelar</button></div> : <div className="itemEditActions"><button className="iconActionButton" type="button" aria-label={`Editar cantidad de ${item.productName}`} disabled={!isEditable} onClick={() => startEditItem(item)}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 16.5V20h3.5L18.1 9.4l-3.5-3.5L4 16.5Zm15.2-8.2 1.1-1.1a1.5 1.5 0 0 0 0-2.1l-1.4-1.4a1.5 1.5 0 0 0-2.1 0l-1.1 1.1 3.5 3.5Z" /></svg></button><button className="iconActionButton dangerButton" type="button" aria-label={`Eliminar ${item.productName}`} disabled={!isEditable || order.items.length <= 1} onClick={() => removeItem(item)}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 21c-1.1 0-2-.9-2-2V7h14v12c0 1.1-.9 2-2 2H7ZM9 4h6l1 1h4v2H4V5h4l1-1Zm0 6v7h2v-7H9Zm4 0v7h2v-7h-2Z" /></svg></button></div>}</div>)}</div>
             <div className="addItemPanel">
               {!isAddingItem ? <button className="secondaryButton" type="button" disabled={!isEditable} onClick={() => setIsAddingItem(true)}>Sumar item o producto al pedido</button> : <form className="addItemForm" onSubmit={addItem}><label>Producto<select name="addVariantId" defaultValue="" required><option value="">Seleccionar producto</option>{variantOptions.map(({ product, variant }) => <option key={variant.id} value={variant.id}>{product.name} · {variant.name} · {variant.availableStock} disp.</option>)}</select></label><label>Cantidad<input name="addQuantity" type="number" min="1" max="99" defaultValue="1" required /></label><div className="modalActions"><button className="secondaryButton" type="button" onClick={() => setIsAddingItem(false)}>Cancelar</button><button type="submit">Sumar al pedido</button></div></form>}
@@ -1627,10 +1698,52 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
             <label>Metodo<select name="method" defaultValue="" required><option value="" disabled>Seleccionar forma de pago</option>{PAYMENT_METHOD_OPTIONS.map((method) => <option key={method.value} value={method.value}>{method.label}</option>)}</select></label>
             <label>Notas<input name="notes" placeholder="Referencia o comentario" /></label>
             <button className="compactButton" type="submit">Registrar pago</button>
+            <div className="paymentHistory">
+              <h3>Historial de pagos</h3>
+              {order.payments.length === 0 ? <p className="statusText">Sin pagos registrados.</p> : order.payments.map((payment) => <div className="paymentHistoryRow" key={payment.id}><span><strong>{formatPrice(payment.amount)}</strong><small>{paymentMethodLabel(payment.method)} · {formatDateTime(payment.paidAt ?? payment.createdAt)}</small>{payment.status === 'REFUNDED' ? <small className="reversedPaymentText">Reversado: {payment.reversalReason || 'sin motivo'}</small> : null}</span>{payment.status === 'REFUNDED' ? <span className="pill muted">Reversado</span> : <button className="secondaryButton compactButton" type="button" onClick={() => reversePayment(payment)}>Reversar pago</button>}</div>)}
+            </div>
           </form>
+          <section className="adminForm receiptActionsPanel">
+            <h3>Comprobante de pago</h3>
+            <p className="statusText">Genera un comprobante imprimible o envialo por email al cliente con el detalle de pagos registrados.</p>
+            <div className="receiptActions">
+              <button className="secondaryButton compactButton" type="button" disabled={order.payments.length === 0} onClick={() => window.print()}>Imprimir comprobante</button>
+              <button className="compactButton" type="button" disabled={isSendingReceipt || order.payments.length === 0} onClick={sendReceipt}>{isSendingReceipt ? 'Enviando...' : 'Enviar por email'}</button>
+            </div>
+            {order.payments.length === 0 ? <p className="statusText compactStatus">Registra al menos un pago para emitir el comprobante.</p> : null}
+          </section>
         </div>
       </div>
     </div>
+  );
+}
+
+function PaymentReceipt({ order, paidAmount }: { order: Order; paidAmount: number }) {
+  const balance = Math.max(order.total - paidAmount, 0);
+
+  return (
+    <section className="paymentReceipt" aria-label="Comprobante de pago imprimible">
+      <div className="receiptHeader">
+        <div><p className="eyebrow">Comprobante de pago</p><h2>Natura reseller</h2><p>Revendedora independiente · No es factura fiscal.</p></div>
+        <div><strong>Pedido {order.id.slice(0, 8)}</strong><span>{formatDateTime(order.createdAt)}</span></div>
+      </div>
+      <div className="receiptCustomer"><span>Cliente</span><strong>{order.customer.firstName} {order.customer.lastName}</strong><small>{order.customer.email}{order.customer.phone ? ` · ${order.customer.phone}` : ''}</small></div>
+      <div className="receiptTable" role="table" aria-label="Items del pedido">
+        <div className="receiptTableHeader" role="row"><span>Producto</span><span>Cant.</span><span>Total</span></div>
+        {order.items.map((item) => <div className="receiptTableRow" key={item.id} role="row"><span>{item.productName}<small>{item.variantName}</small></span><span>{item.quantity}</span><span>{formatPrice(item.lineTotal)}</span></div>)}
+      </div>
+      <div className="receiptTotals">
+        <span>Subtotal <strong>{formatPrice(order.subtotal)}</strong></span>
+        <span>Entrega <strong>{formatPrice(order.deliveryCost)}</strong></span>
+        <span>Total <strong>{formatPrice(order.total)}</strong></span>
+        <span>Pagado <strong>{formatPrice(paidAmount)}</strong></span>
+        <span>Saldo pendiente <strong>{formatPrice(balance)}</strong></span>
+      </div>
+      <div className="receiptPayments">
+        <h3>Pagos registrados</h3>
+        {order.payments.length === 0 ? <p>Sin pagos registrados.</p> : order.payments.map((payment) => <p key={payment.id} className={payment.status === 'REFUNDED' ? 'reversedPaymentText' : undefined}><strong>{formatPrice(payment.amount)}</strong> · {payment.status === 'REFUNDED' ? 'Reversado' : paymentMethodLabel(payment.method)} · {formatDateTime(payment.paidAt ?? payment.createdAt)}{payment.status === 'REFUNDED' && payment.reversalReason ? ` · ${payment.reversalReason}` : ''}</p>)}
+      </div>
+    </section>
   );
 }
 
