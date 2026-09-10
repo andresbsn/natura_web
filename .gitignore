@@ -12,3 +12,4 @@ uploads/
 dumps/
 backup_*.sql
 *_dump.sql
+*.ab-backup-*
