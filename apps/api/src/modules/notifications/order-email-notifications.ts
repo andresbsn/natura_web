@@ -3,9 +3,11 @@ import nodemailer from 'nodemailer';
 
 import { env } from '../../config/env.js';
 import { prisma } from '../../db/prisma.js';
+import { formatOrderNumber } from '../orders/order.mappers.js';
 
 type OrderStatusEmailData = {
   orderId: string;
+  orderNumber: number;
   customerId: string;
   customerEmail: string;
   customerFirstName: string;
@@ -16,6 +18,7 @@ type OrderStatusEmailData = {
 
 type PaymentReceiptEmailData = {
   orderId: string;
+  orderNumber: number;
   customerId: string;
   customerEmail: string;
   customerFirstName: string;
@@ -97,14 +100,15 @@ function paidAmount(order: PaymentReceiptEmailData) {
 }
 
 export async function sendOrderStatusEmail(order: OrderStatusEmailData) {
-  const subject = `Actualizacion de tu pedido ${order.orderId.slice(0, 8)}`;
+  const displayOrderNumber = formatOrderNumber(order.orderNumber);
+  const subject = `Actualizacion de tu pedido ${displayOrderNumber}`;
   const statusLabel = statusLabels[order.status];
   const text = [
     `Hola ${order.customerFirstName},`,
     '',
     statusMessages[order.status],
     '',
-    `Pedido: ${order.orderId}`,
+    `Pedido: ${displayOrderNumber}`,
     `Estado anterior: ${statusLabels[order.previousStatus]}`,
     `Estado actual: ${statusLabel}`,
     `Total: ${formatCurrency(order.total.toNumber())}`,
@@ -170,8 +174,27 @@ export async function sendOrderStatusEmail(order: OrderStatusEmailData) {
   }
 }
 
+export async function sendOrderCreatedEmails(order: { orderId: string; orderNumber: number; customerId: string; customerEmail: string; customerFirstName: string; total: { toNumber(): number } }) {
+  const recipients = [order.customerEmail, ...(env.ORDER_NOTIFICATION_INTERNAL_RECIPIENTS ?? '').split(',').map((value) => value.trim()).filter(Boolean)];
+  const displayOrderNumber = formatOrderNumber(order.orderNumber);
+  const subject = `Nuevo pedido ${displayOrderNumber}`;
+  const text = [`Hola ${order.customerFirstName},`, '', 'Recibimos tu pedido y quedó pendiente de revisión.', `Pedido: ${displayOrderNumber}`, `Total: ${formatCurrency(order.total.toNumber())}`].join('\n');
+  const configured = Boolean(env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASSWORD && env.SMTP_FROM);
+  for (const recipient of recipients) {
+    let sent = false; let reason = configured ? undefined : 'SMTP_NOT_CONFIGURED';
+    try {
+      if (configured) {
+        const transporter = nodemailer.createTransport({ host: env.SMTP_HOST, port: env.SMTP_PORT, secure: env.SMTP_PORT === 465, auth: { user: env.SMTP_USER, pass: env.SMTP_PASSWORD } });
+        await transporter.sendMail({ from: env.SMTP_FROM, to: recipient, subject, text }); sent = true;
+      }
+    } catch { reason = 'SMTP_SEND_FAILED'; }
+    await prisma.notification.create({ data: { userId: recipient === order.customerEmail ? order.customerId : null, orderId: order.orderId, channel: 'EMAIL', subject, payload: { event: 'ORDER_CREATED', recipient, sent, ...(reason ? { reason } : {}) }, ...(sent ? { sentAt: new Date() } : {}) } }).catch(() => undefined);
+  }
+}
+
 export async function sendPaymentReceiptEmail(order: PaymentReceiptEmailData, actorId: string) {
-  const subject = `Comprobante de pago - pedido ${order.orderId.slice(0, 8)}`;
+  const displayOrderNumber = formatOrderNumber(order.orderNumber);
+  const subject = `Comprobante de pago - pedido ${displayOrderNumber}`;
   const totalPaid = paidAmount(order);
   const balance = Math.max(order.total.toNumber() - totalPaid, 0);
   const paymentLines = order.payments.length > 0
@@ -183,7 +206,7 @@ export async function sendPaymentReceiptEmail(order: PaymentReceiptEmailData, ac
     '',
     'Te enviamos el comprobante de pago registrado para tu pedido. Este comprobante corresponde a una compra coordinada con una revendedora independiente y no es una factura fiscal.',
     '',
-    `Pedido: ${order.orderId}`,
+    `Pedido: ${displayOrderNumber}`,
     `Fecha del pedido: ${formatDate(order.createdAt)}`,
     `Cliente: ${order.customerFirstName} ${order.customerLastName}`,
     `Estado del pedido: ${statusLabels[order.status]}`,

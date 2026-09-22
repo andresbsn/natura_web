@@ -17,7 +17,11 @@ export function notFoundHandler(req: Request, _res: Response, next: NextFunction
   next(new AppError(404, `Route not found: ${req.method} ${req.path}`, 'NOT_FOUND'));
 }
 
-export function errorHandler(error: unknown, _req: Request, res: Response, _next: NextFunction) {
+export function errorHandler(error: unknown, req: Request, res: Response, _next: NextFunction) {
+  if (!(error instanceof AppError) && !(error instanceof ZodError) && !(error instanceof multer.MulterError)) {
+    console.error(`Unhandled API error ${req.method} ${req.originalUrl}:`, error);
+  }
+
   if (error instanceof ZodError) {
     return res.status(400).json({
       error: {

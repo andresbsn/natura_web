@@ -88,6 +88,17 @@ a { color: inherit; }
   max-width: 1120px;
 }
 
+.detailGrid, .reportGrid { display: grid; gap: 1.25rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.detailGallery { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); align-content: start; }
+.detailGallery img, .detailGallery span { aspect-ratio: 1; background: #fff; border-radius: 1rem; object-fit: contain; padding: .75rem; width: 100%; }
+.detailGallery span { align-items: center; color: #61715d; display: flex; font-weight: 800; justify-content: center; }
+.reportGrid { grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 1rem; }
+.reportSection h3 { color: #315d3a; }
+.reportSection ul { line-height: 1.8; margin: 0; padding-left: 1.2rem; }
+.reportFilters { margin-bottom: 1rem; }
+.pagination { align-items: center; display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem; }
+.pagination button { background: #e8dccd; border: 0; border-radius: 999px; color: #315d3a; font-weight: 800; padding: .7rem 1rem; }
+
 .heroGrid {
   align-items: center;
   display: grid;
@@ -327,6 +338,30 @@ button:disabled {
   margin-top: auto;
 }
 
+.productCardActions {
+  align-items: center;
+  display: flex;
+  gap: 0.65rem;
+  justify-content: space-between;
+  margin-top: auto;
+  padding-top: 0.35rem;
+}
+
+.productCardActions .addToCartButton {
+  flex: 1;
+  font-size: 0.9rem;
+  min-height: 2.8rem;
+  padding: 0.7rem 0.85rem;
+}
+
+.productCardActions .detailLink {
+  flex: 0 0 auto;
+  font-size: 0.82rem;
+  padding: 0.35rem 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .authSection {
   display: grid;
   justify-items: center;
@@ -390,56 +425,12 @@ button:disabled {
   padding: 1rem;
 }
 
-.appAlertBackdrop {
-  align-items: center;
-  background: transparent;
-  display: flex;
-  justify-content: center;
-  padding: 1rem;
-  pointer-events: none;
-  position: fixed;
-  top: 5.5rem;
-  width: 100%;
-  z-index: 100;
-}
-
-.appAlert {
-  align-items: center;
-  background: #fff;
-  border: 1px solid rgba(49, 93, 58, 0.24);
-  border-radius: 1.25rem;
-  box-shadow: 0 1.25rem 3rem rgba(38, 50, 39, 0.18);
-  color: #315d3a;
-  display: flex;
-  gap: 1rem;
-  font-weight: 800;
-  justify-content: space-between;
-  max-width: min(24rem, calc(100vw - 2rem));
-  padding: 1rem 1.25rem;
-  pointer-events: auto;
-  text-align: center;
-  width: min(24rem, calc(100vw - 2rem));
-}
-
-.appAlertError {
-  border-color: rgba(164, 93, 45, 0.35);
-  color: #8d3f26;
-}
-
-.appAlertSuccess {
-  border-color: rgba(49, 93, 58, 0.24);
-  color: #315d3a;
-}
-
-.appAlertClose {
-  background: transparent;
-  border: 0;
-  color: inherit;
-  cursor: pointer;
-  font-size: 1.35rem;
-  font-weight: 900;
-  line-height: 1;
-  padding: 0.1rem;
+.naturaToast {
+  border: 1px solid rgba(49, 93, 58, 0.18) !important;
+  border-radius: 1rem !important;
+  box-shadow: 0 1rem 2.5rem rgba(38, 50, 39, 0.16) !important;
+  font-family: inherit !important;
+  font-weight: 800 !important;
 }
 
 .errorText {
@@ -533,6 +524,112 @@ button:disabled {
 .cartList {
   display: grid;
   gap: 1rem;
+}
+
+.customerOrderCard {
+  box-shadow: 0 12px 30px rgba(43, 62, 38, 0.06);
+  display: grid;
+  gap: 1.1rem;
+  padding: 1.25rem 1.4rem;
+}
+
+.customerOrderHeader,
+.customerOrderFooter,
+.customerOrderItem {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.customerOrderHeader {
+  border-bottom: 1px solid rgba(49, 93, 58, 0.1);
+  padding-bottom: 1rem;
+}
+
+.customerOrderHeader > div:first-child {
+  align-items: baseline;
+  display: flex;
+  gap: 0.45rem;
+}
+
+.orderCardLabel {
+  color: #a45d2d;
+  font-size: 0.75rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.orderStatusGroup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: flex-end;
+}
+
+.orderStatusBadge {
+  background: #e8dccd;
+  border-radius: 999px;
+  color: #52624d;
+  font-size: 0.74rem;
+  font-weight: 900;
+  padding: 0.4rem 0.65rem;
+}
+
+.orderStatusBadge.ok {
+  background: rgba(49, 93, 58, 0.12);
+  color: #315d3a;
+}
+
+.orderStatusBadge.warning {
+  background: rgba(194, 128, 69, 0.16);
+  color: #8d5a22;
+}
+
+.orderStatusBadge.muted {
+  background: rgba(164, 93, 45, 0.12);
+  color: #8d3f26;
+}
+
+.customerOrderItems {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.customerOrderItem {
+  justify-content: initial;
+}
+
+.customerOrderQuantity {
+  color: #a45d2d;
+  font-weight: 900;
+  min-width: 2rem;
+}
+
+.customerOrderProduct {
+  color: #315d3a;
+  flex: 1;
+}
+
+.customerOrderItem strong {
+  color: #1f2f23;
+  white-space: nowrap;
+}
+
+.customerOrderFooter {
+  border-top: 1px solid rgba(49, 93, 58, 0.1);
+  padding-top: 1rem;
+}
+
+.customerOrderFooter > strong {
+  color: #52624d;
+  font-size: 0.9rem;
+}
+
+.customerOrderFooter > strong span {
+  color: #1f2f23;
+  font-size: 1.2rem;
+  margin-left: 0.25rem;
 }
 
 .cartList {
@@ -775,7 +872,7 @@ button:disabled {
 }
 
 .accountPage .sectionHeader {
-  align-items: stretch;
+  align-items: flex-start;
 }
 
 .balanceCard {
@@ -783,26 +880,72 @@ button:disabled {
   border: 1px solid rgba(49, 93, 58, 0.12);
   border-radius: 1.3rem;
   box-shadow: 0 16px 38px rgba(43, 62, 38, 0.08);
-  min-width: 15rem;
-  padding: 1rem 1.2rem;
+  min-width: 17rem;
+  padding: 1.1rem 1.25rem;
 }
 
-.balanceCard span {
+.balanceCardHeader,
+.balanceMain,
+.balanceCredit {
+  display: flex;
+  justify-content: space-between;
+}
+
+.balanceCardHeader {
+  align-items: center;
+  border-bottom: 1px solid rgba(49, 93, 58, 0.1);
+  padding-bottom: 0.8rem;
+}
+
+.balanceCardHeader > span:first-child,
+.balanceCredit span,
+.balanceMain small {
   color: #52624d;
   display: block;
   font-size: 0.8rem;
   font-weight: 900;
-  margin-bottom: 0.35rem;
   text-transform: uppercase;
 }
 
-.balanceCard strong {
+.balanceStatus {
+  background: rgba(49, 93, 58, 0.08);
+  border-radius: 999px;
   color: #315d3a;
-  font-size: 1.4rem;
+  font-size: 0.7rem;
+  font-weight: 900;
+  padding: 0.3rem 0.55rem;
+  text-transform: uppercase;
 }
 
-.balanceCard.debt strong {
+.balanceCard.debt .balanceStatus {
+  background: rgba(141, 90, 34, 0.12);
   color: #8d5a22;
+}
+
+.balanceMain {
+  align-items: end;
+  gap: 1rem;
+  padding: 1rem 0;
+}
+
+.balanceMain strong {
+  color: #315d3a;
+  font-size: 1.65rem;
+}
+
+.balanceCard.debt .balanceMain strong {
+  color: #8d5a22;
+}
+
+.balanceCredit {
+  align-items: center;
+  border-top: 1px solid rgba(49, 93, 58, 0.1);
+  padding-top: 0.8rem;
+}
+
+.balanceCredit strong {
+  color: #315d3a;
+  font-size: 1rem;
 }
 
 .accountMovementList {
@@ -817,12 +960,26 @@ button:disabled {
   border-radius: 1rem;
   display: grid;
   gap: 0.75rem;
-  grid-template-columns: minmax(14rem, 1fr) minmax(8rem, auto) minmax(10rem, auto) minmax(8rem, auto);
+  grid-template-columns: minmax(14rem, 1fr) minmax(8rem, auto) minmax(9rem, auto) minmax(9rem, auto);
   padding: 0.9rem 1rem;
 }
 
-.accountMovementRow small {
+.accountMovementInfo,
+.accountMovementAmount,
+.accountMovementBalance {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.accountMovementAmount,
+.accountMovementBalance {
+  justify-items: end;
+}
+
+.accountMovementRow small,
+.accountMovementRow time {
   color: #52624d;
+  font-size: 0.82rem;
 }
 
 .debitAmount,
@@ -897,6 +1054,35 @@ button:disabled {
 .iconButton {
   background: #e8dccd !important;
   color: #315d3a !important;
+}
+
+.modalCloseButton {
+  align-items: center;
+  background: #f7f1e8;
+  border: 1px solid rgba(49, 93, 58, 0.16);
+  border-radius: 0.85rem;
+  color: #315d3a;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 2.65rem;
+  justify-content: center;
+  padding: 0;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+  width: 2.65rem;
+}
+
+.modalCloseButton:hover,
+.modalCloseButton:focus-visible {
+  background: #e8dccd;
+  border-color: rgba(49, 93, 58, 0.32);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.modalCloseButton svg {
+  fill: currentColor;
+  height: 1.05rem;
+  width: 1.05rem;
 }
 
 .modalBody {
@@ -1028,6 +1214,30 @@ button:disabled {
 
 .orderModal {
   max-width: 1080px;
+  padding: 1.5rem;
+}
+
+.orderModalHeader {
+  border-bottom: 1px solid rgba(49, 93, 58, 0.12);
+  margin-bottom: 1.1rem;
+  padding-bottom: 1.1rem;
+}
+
+.orderTitleLine {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.orderTitleLine h3 {
+  margin-right: 0.35rem;
+}
+
+.orderCreatedAt {
+  color: #52624d;
+  font-size: 0.82rem;
+  margin: 0.45rem 0 0;
 }
 
 .orderModalSummary,
@@ -1039,7 +1249,7 @@ button:disabled {
 
 .orderModalSummary {
   grid-template-columns: repeat(3, 1fr);
-  margin: 1rem 0;
+  margin: 0 0 1.25rem;
 }
 
 .orderModalSummary article,
@@ -1050,6 +1260,10 @@ button:disabled {
   border: 1px solid rgba(49, 93, 58, 0.1);
   border-radius: 1.2rem;
   padding: 1rem;
+}
+
+.orderModalSummary article {
+  min-height: 6.2rem;
 }
 
 .orderModalSummary span,
@@ -1073,6 +1287,28 @@ button:disabled {
 
 .orderModalGrid {
   grid-template-columns: minmax(0, 1.1fr) minmax(18rem, 0.75fr);
+}
+
+.panelHeading {
+  align-items: start;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.panelHeading .eyebrow {
+  margin-bottom: 0.3rem;
+}
+
+.panelHeading h3 {
+  margin-bottom: 0;
+}
+
+.panelBalance {
+  color: #8d5a22;
+  font-size: 0.82rem;
+  text-align: right;
 }
 
 .orderEditForm {
@@ -1115,6 +1351,22 @@ button:disabled {
   justify-self: start;
   padding: 0.68rem 0.95rem !important;
   width: auto !important;
+}
+
+.loadingSpinner {
+  animation: spin 0.8s linear infinite;
+  border: 2px solid rgba(255, 250, 242, 0.45);
+  border-radius: 50%;
+  border-top-color: #fffaf2;
+  display: inline-block;
+  height: 0.9rem;
+  margin-right: 0.45rem;
+  vertical-align: -0.1rem;
+  width: 0.9rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .iconActionButton {
@@ -1204,6 +1456,11 @@ button:disabled {
   gap: 1rem;
   margin-bottom: 1rem;
   padding: 1rem;
+}
+
+.orderModal > .paymentReceipt {
+  background: #fffdf9;
+  box-shadow: inset 0 0 0 1px rgba(49, 93, 58, 0.03);
 }
 
 .receiptHeader,
@@ -1511,6 +1768,8 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .detailGrid { grid-template-columns: 1fr; }
+
   .adminSidebar {
     position: static;
   }
@@ -1521,6 +1780,19 @@ button:disabled {
   .modalActions {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .orderModalHeader {
+    align-items: flex-start;
+    flex-direction: row;
+  }
+
+  .orderModalHeader > div {
+    min-width: 0;
+  }
+
+  .orderModalHeader .modalCloseButton {
+    margin-left: auto;
   }
 
   .adminTableRow {
@@ -1544,6 +1816,11 @@ button:disabled {
   .accountTableRow,
   .accountMovementRow {
     grid-template-columns: 1fr;
+  }
+
+  .accountMovementAmount,
+  .accountMovementBalance {
+    justify-items: start;
   }
 
   .orderItemRow {
@@ -1580,9 +1857,20 @@ button:disabled {
     flex-direction: column;
   }
 
-  .appAlert {
-    width: auto;
+  .customerOrderHeader,
+  .customerOrderFooter {
+    align-items: flex-start;
+    flex-direction: column;
   }
+
+  .orderStatusGroup {
+    justify-content: flex-start;
+  }
+
+  .customerOrderFooter button {
+    width: 100%;
+  }
+
 }
 
 @media print {
@@ -1625,5 +1913,13 @@ button:disabled {
     position: fixed;
     inset: 0 auto auto 0;
     width: 100%;
+  }
+
+  .paymentReceipt .receiptTotals {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .paymentReceipt .receiptTotals span {
+    text-align: right;
   }
 }

@@ -22,16 +22,27 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
 }
 
 export function requireRole(...roles: string[]) {
-  return (req: Request, _res: Response, next: NextFunction) => {
+  return async (req: Request, _res: Response, next: NextFunction) => {
     if (!req.user) {
       return next(new AppError(401, 'Authentication required', 'AUTH_REQUIRED'));
     }
 
-    if (!roles.includes(req.user.role)) {
-      return next(new AppError(403, 'Insufficient permissions', 'FORBIDDEN'));
-    }
+    try {
+      const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { role: true, isActive: true } });
 
-    return next();
+      if (!user || !user.isActive) {
+        return next(new AppError(401, 'Invalid session', 'INVALID_SESSION'));
+      }
+
+      req.user.role = user.role;
+      if (!roles.includes(user.role)) {
+        return next(new AppError(403, 'Insufficient permissions', 'FORBIDDEN'));
+      }
+
+      return next();
+    } catch (error) {
+      return next(error);
+    }
   };
 }
 

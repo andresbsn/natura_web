@@ -57,6 +57,8 @@ enum CustomerAccountMovementType {
   PAYMENT_REFUND_DEBIT
   MANUAL_DEBIT_ADJUSTMENT
   MANUAL_CREDIT_ADJUSTMENT
+  CREDIT_APPLICATION
+  CREDIT_APPLICATION_REVERSAL
 }
 
 enum CustomerAccountMovementDirection {
@@ -84,10 +86,17 @@ model User {
   auditLogs          AuditLog[]          @relation("AuditActor")
   refreshTokens      RefreshToken[]
   emailTokens        EmailVerificationToken[]
+  passwordResetTokens PasswordResetToken[]
+  notifications      Notification[]
   stockMovements     StockMovement[]     @relation("StockMovementActor")
   customerAccount    CustomerAccount?
   customerMovements  CustomerAccountMovement[] @relation("CustomerAccountMovementCustomer")
   accountActions     CustomerAccountMovement[] @relation("CustomerAccountMovementActor")
+  creditApplicationsAsCustomer CreditApplication[] @relation("CreditApplicationCustomer")
+  creditApplicationsAsActor    CreditApplication[] @relation("CreditApplicationActor")
+  paymentCreditAllocations     PaymentCreditAllocation[] @relation("PaymentCreditAllocationActor")
+  creditApplicationReversals   CreditApplication[] @relation("CreditApplicationReversalActor")
+  paymentCreditAllocationReversals PaymentCreditAllocation[] @relation("PaymentCreditAllocationReversalActor")
 }
 
 model EmailVerificationToken {
@@ -112,6 +121,17 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, expiresAt])
 }
 
 model Category {
@@ -270,6 +290,7 @@ model DeliveryMethod {
 
 model Order {
   id                String        @id @default(uuid())
+  orderNumber       Int           @unique @default(autoincrement())
   customerId        String
   deliveryMethodId  String?
   status            OrderStatus   @default(PENDING)
@@ -285,6 +306,7 @@ model Order {
   deliveryCost      Decimal       @default(0) @db.Decimal(12, 2)
   total             Decimal       @db.Decimal(12, 2)
   cancelledAt       DateTime?
+  deliveredAt       DateTime?
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
@@ -294,6 +316,10 @@ model Order {
   payments       Payment[]
   stockMovements StockMovement[]
   accountMovements CustomerAccountMovement[]
+  creditApplications CreditApplication[] @relation("CreditApplicationDestinationOrder")
+  notifications      Notification[]
+
+  @@index([status, deliveredAt])
 }
 
 model OrderItem {
@@ -319,6 +345,9 @@ model Payment {
   orderId        String
   registeredById String
   amount         Decimal       @db.Decimal(12, 2)
+  idempotencyKey String?       @unique
+  appliedAmount  Decimal       @default(0) @db.Decimal(12, 2)
+  creditAmount   Decimal       @default(0) @db.Decimal(12, 2)
   status         PaymentStatus
   method         String?
   notes          String?
@@ -332,6 +361,7 @@ model Payment {
   registeredBy User  @relation("PaymentRegisteredBy", fields: [registeredById], references: [id], onDelete: Restrict)
   reversedBy   User? @relation("PaymentReversedBy", fields: [reversedById], references: [id], onDelete: Restrict)
   accountMovements CustomerAccountMovement[]
+  creditAllocations PaymentCreditAllocation[]
 
   @@index([reversedById])
 }
@@ -340,6 +370,7 @@ model CustomerAccount {
   id             String   @id @default(uuid())
   customerId     String   @unique
   currentBalance Decimal  @default(0) @db.Decimal(12, 2)
+  availableCredit Decimal @default(0) @db.Decimal(12, 2)
   currency       String   @default("ARS")
   lastMovementAt DateTime?
   createdAt      DateTime @default(now())
@@ -347,6 +378,7 @@ model CustomerAccount {
 
   customer  User                      @relation(fields: [customerId], references: [id], onDelete: Restrict)
   movements CustomerAccountMovement[]
+  creditApplications CreditApplication[]
 
   @@index([currentBalance])
   @@index([lastMovementAt])
@@ -376,6 +408,7 @@ model CustomerAccountMovement {
   order    Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
   payment  Payment?        @relation(fields: [paymentId], references: [id], onDelete: SetNull)
   actor    User?           @relation("CustomerAccountMovementActor", fields: [actorId], references: [id], onDelete: SetNull)
+  creditApplication CreditApplication?
 
   @@index([customerAccountId, occurredAt])
   @@index([customerId, occurredAt])
@@ -383,6 +416,61 @@ model CustomerAccountMovement {
   @@index([paymentId])
   @@index([actorId])
   @@index([type])
+}
+
+model CreditApplication {
+  id                String   @id @default(uuid())
+  customerAccountId String
+  customerId        String
+  destinationOrderId String
+  movementId        String   @unique
+  appliedById       String
+  amount            Decimal  @db.Decimal(12, 2)
+  remainingAmount   Decimal  @default(0) @db.Decimal(12, 2)
+  idempotencyKey    String   @unique
+  description       String?
+  reversedAt        DateTime?
+  reversedById      String?
+  reversalReason    String?
+  appliedAt         DateTime @default(now())
+  createdAt         DateTime @default(now())
+
+  customerAccount CustomerAccount        @relation(fields: [customerAccountId], references: [id], onDelete: Restrict)
+  customer        User                   @relation("CreditApplicationCustomer", fields: [customerId], references: [id], onDelete: Restrict)
+  destinationOrder Order                 @relation("CreditApplicationDestinationOrder", fields: [destinationOrderId], references: [id], onDelete: Restrict)
+  movement        CustomerAccountMovement @relation(fields: [movementId], references: [id], onDelete: Restrict)
+  appliedBy       User                   @relation("CreditApplicationActor", fields: [appliedById], references: [id], onDelete: Restrict)
+  reversedBy      User?                  @relation("CreditApplicationReversalActor", fields: [reversedById], references: [id], onDelete: Restrict)
+  paymentAllocations PaymentCreditAllocation[]
+
+  @@index([customerId, appliedAt])
+  @@index([customerAccountId, appliedAt])
+  @@index([destinationOrderId])
+  @@index([appliedById])
+  @@index([reversedById])
+}
+
+model PaymentCreditAllocation {
+  id                 String   @id @default(uuid())
+  paymentId          String
+  creditApplicationId String
+  allocatedById      String
+  amount             Decimal  @db.Decimal(12, 2)
+  reversedAt         DateTime?
+  reversedById       String?
+  reversalReason     String?
+  idempotencyKey     String   @unique
+  createdAt          DateTime @default(now())
+
+  payment          Payment          @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  creditApplication CreditApplication @relation(fields: [creditApplicationId], references: [id], onDelete: Restrict)
+  allocatedBy      User             @relation("PaymentCreditAllocationActor", fields: [allocatedById], references: [id], onDelete: Restrict)
+  reversedBy       User?            @relation("PaymentCreditAllocationReversalActor", fields: [reversedById], references: [id], onDelete: Restrict)
+
+  @@unique([paymentId, creditApplicationId])
+  @@index([paymentId])
+  @@index([creditApplicationId])
+  @@index([reversedById])
 }
 
 model StockMovement {
@@ -409,6 +497,10 @@ model Notification {
   payload   Json
   sentAt    DateTime?
   createdAt DateTime  @default(now())
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  order Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  @@index([userId, createdAt])
+  @@index([orderId, createdAt])
 }
 
 model AuditLog {

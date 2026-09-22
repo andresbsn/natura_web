@@ -1,4 +1,5 @@
 import bcrypt from 'bcryptjs';
+import type { Prisma } from '@prisma/client';
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
@@ -7,9 +8,11 @@ import { env } from '../../config/env.js';
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
 import { sendEmailVerificationEmail } from '../notifications/email-verification-notifications.js';
+import { sendPasswordResetEmail } from '../notifications/password-reset-notifications.js';
 import { requireAuth } from './auth.middleware.js';
 import {
   emailVerificationTokenExpiresAt,
+  passwordResetTokenExpiresAt,
   generateOpaqueToken,
   hashToken,
   refreshTokenExpiresAt,
@@ -45,6 +48,8 @@ const verifyEmailSchema = z.object({
 const resendVerificationSchema = z.object({
   email: z.string().email().transform((value) => value.toLowerCase()),
 });
+const passwordResetRequestSchema = z.object({ email: z.string().email().transform((value) => value.toLowerCase()) });
+const passwordResetSchema = z.object({ token: z.string().min(32), password: z.string().min(8) });
 
 export const authRouter = Router();
 
@@ -87,9 +92,9 @@ async function createEmailVerificationToken(userId: string) {
   return token;
 }
 
-async function createSession(user: { id: string; role: string }) {
+async function createSession(tx: Prisma.TransactionClient | typeof prisma, user: { id: string; role: string }) {
   const refreshToken = signRefreshToken(user.id);
-  await prisma.refreshToken.create({
+  await tx.refreshToken.create({
     data: {
       userId: user.id,
       tokenHash: hashToken(refreshToken),
@@ -165,7 +170,7 @@ authRouter.post('/verify-email', authLimiter, async (req, res, next) => {
       return tx.user.update({ where: { id: storedToken.userId }, data: { emailVerifiedAt: storedToken.user.emailVerifiedAt ?? now } });
     });
 
-    const session = await createSession(user);
+    const session = await createSession(prisma, user);
 
     setRefreshCookie(res, session.refreshToken);
     res.json({ user: publicUser(user), accessToken: session.accessToken });
@@ -207,12 +212,44 @@ authRouter.post('/login', authLimiter, async (req, res, next) => {
       throw new AppError(403, 'Email verification required', 'EMAIL_VERIFICATION_REQUIRED');
     }
 
-    const session = await createSession(user);
+    const session = await createSession(prisma, user);
     setRefreshCookie(res, session.refreshToken);
     res.json({ user: publicUser(user), accessToken: session.accessToken });
   } catch (error) {
     next(error);
   }
+});
+
+authRouter.post('/request-password-reset', authLimiter, async (req, res, next) => {
+  try {
+    const data = passwordResetRequestSchema.parse(req.body);
+    const user = await prisma.user.findUnique({ where: { email: data.email } });
+    if (user?.isActive) {
+      const token = generateOpaqueToken();
+      await prisma.$transaction(async (tx) => {
+        await tx.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+        await tx.passwordResetToken.create({ data: { userId: user.id, tokenHash: hashToken(token), expiresAt: passwordResetTokenExpiresAt() } });
+      });
+      await sendPasswordResetEmail({ userId: user.id, email: user.email, firstName: user.firstName, token });
+    }
+    res.json({ message: 'Si el email corresponde a una cuenta activa, recibirás instrucciones para restablecer tu contraseña.' });
+  } catch (error) { next(error); }
+});
+
+authRouter.post('/reset-password', authLimiter, async (req, res, next) => {
+  try {
+    const data = passwordResetSchema.parse(req.body);
+    const now = new Date();
+    await prisma.$transaction(async (tx) => {
+      const token = await tx.passwordResetToken.findUnique({ where: { tokenHash: hashToken(data.token) } });
+      if (!token || token.usedAt || token.expiresAt <= now) throw new AppError(400, 'Invalid or expired password reset token', 'INVALID_PASSWORD_RESET_TOKEN');
+      const consumed = await tx.passwordResetToken.updateMany({ where: { id: token.id, usedAt: null, expiresAt: { gt: now } }, data: { usedAt: now } });
+      if (consumed.count !== 1) throw new AppError(400, 'Invalid or expired password reset token', 'INVALID_PASSWORD_RESET_TOKEN');
+      await tx.user.update({ where: { id: token.userId }, data: { passwordHash: await bcrypt.hash(data.password, 12) } });
+      await tx.refreshToken.updateMany({ where: { userId: token.userId, revokedAt: null }, data: { revokedAt: now } });
+    });
+    res.json({ message: 'Contraseña actualizada. Inicia sesión nuevamente.' });
+  } catch (error) { next(error); }
 });
 
 authRouter.post('/refresh', authLimiter, async (req, res, next) => {
@@ -231,8 +268,18 @@ authRouter.post('/refresh', authLimiter, async (req, res, next) => {
       throw new AppError(401, 'Invalid refresh token', 'INVALID_REFRESH_TOKEN');
     }
 
-    await prisma.refreshToken.update({ where: { id: storedToken.id }, data: { revokedAt: new Date() } });
-    const session = await createSession(storedToken.user);
+    const session = await prisma.$transaction(async (tx) => {
+      const revoked = await tx.refreshToken.updateMany({
+        where: { id: storedToken.id, revokedAt: null, expiresAt: { gt: new Date() } },
+        data: { revokedAt: new Date() },
+      });
+
+      if (revoked.count !== 1) {
+        throw new AppError(401, 'Invalid refresh token', 'INVALID_REFRESH_TOKEN');
+      }
+
+      return createSession(tx, storedToken.user);
+    });
 
     setRefreshCookie(res, session.refreshToken);
     res.json({ user: publicUser(storedToken.user), accessToken: session.accessToken });

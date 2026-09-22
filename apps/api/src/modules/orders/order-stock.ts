@@ -65,6 +65,12 @@ export function assertAdminOrderStatusTransition(currentStatus: OrderStatus, nex
 
 }
 
+export function assertOrderIsMutable(status: OrderStatus) {
+  if (status === 'CANCELLED') {
+    throw new AppError(409, 'Cancelled orders are immutable', 'ORDER_IMMUTABLE');
+  }
+}
+
 export function orderStockAction(currentStatus: OrderStatus, nextStatus: OrderStatus | undefined): OrderStockAction | null {
   if (!nextStatus || nextStatus === currentStatus) return null;
 

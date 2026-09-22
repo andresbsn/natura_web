@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 import { prisma } from '../../db/prisma.js';
@@ -11,6 +12,8 @@ export const catalogRouter = Router();
 const catalogQuerySchema = z.object({
   search: z.string().trim().min(1).optional(),
   categorySlug: z.string().trim().min(1).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(24),
 });
 
 catalogRouter.get('/categories', async (_req, res, next) => {
@@ -50,8 +53,8 @@ catalogRouter.get('/delivery-methods', async (_req, res, next) => {
 catalogRouter.get('/products', async (req, res, next) => {
   try {
     const query = catalogQuerySchema.parse(req.query);
-    const products = await prisma.product.findMany({
-      where: {
+    const { page, pageSize } = query;
+    const where: Prisma.ProductWhereInput = {
         isActive: true,
         ...(query.search
           ? {
@@ -63,12 +66,13 @@ catalogRouter.get('/products', async (req, res, next) => {
             }
           : {}),
         ...(query.categorySlug ? { category: { slug: query.categorySlug, isActive: true } } : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      include: productInclude,
-    });
+    };
+    const [products, total] = await prisma.$transaction([
+      prisma.product.findMany({ where, orderBy: { createdAt: 'desc' }, include: productInclude, skip: (page - 1) * pageSize, take: pageSize }),
+      prisma.product.count({ where }),
+    ]);
 
-    res.json({ products: products.map((product) => mapProduct(product)) });
+    res.json({ products: products.map((product) => mapProduct(product)), pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } });
   } catch (error) {
     next(error);
   }

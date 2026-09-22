@@ -211,13 +211,18 @@ adminProductsRouter.patch('/categories/:id', async (req, res, next) => {
   }
 });
 
-adminProductsRouter.get('/products', async (_req, res, next) => {
+adminProductsRouter.get('/products', async (req, res, next) => {
   try {
-    const products = await prisma.product.findMany({
+    const query = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25), search: z.string().trim().min(1).max(120).optional(), isActive: z.coerce.boolean().optional() }).parse(req.query);
+    const paginate = req.query.page !== undefined || req.query.pageSize !== undefined;
+    const where = { ...(query.isActive === undefined ? {} : { isActive: query.isActive }), ...(query.search ? { OR: [{ name: { contains: query.search, mode: 'insensitive' as const } }, { slug: { contains: query.search, mode: 'insensitive' as const } }] } : {}) };
+    const [products, total] = await prisma.$transaction([prisma.product.findMany({
+      where,
       orderBy: { createdAt: 'desc' },
       include: productInclude,
-    });
-      res.json({ products: products.map((product) => mapProduct(product, true, true)) });
+      ...(paginate ? { skip: (query.page - 1) * query.pageSize, take: query.pageSize } : {}),
+    }), prisma.product.count({ where })]);
+    res.json({ products: products.map((product) => mapProduct(product, true, true)), pagination: { page: query.page, pageSize: paginate ? query.pageSize : total, total, totalPages: paginate ? Math.ceil(total / query.pageSize) : 1 } });
   } catch (error) {
     next(error);
   }

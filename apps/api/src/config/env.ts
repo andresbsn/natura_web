@@ -23,6 +23,7 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASSWORD: z.string().optional(),
   SMTP_FROM: z.string().optional(),
+  ORDER_NOTIFICATION_INTERNAL_RECIPIENTS: z.string().optional(),
 }).superRefine((data, ctx) => {
   const webUrl = new URL(data.WEB_URL);
   const isLocalWebUrl = webUrl.hostname === 'localhost' || webUrl.hostname === '127.0.0.1';
@@ -33,6 +34,22 @@ const envSchema = z.object({
       message: 'WEB_URL must be the public frontend URL in production, not localhost.',
       path: ['WEB_URL'],
     });
+  }
+
+  if (data.NODE_ENV === 'production') {
+    for (const [name, value] of [['JWT_ACCESS_SECRET', data.JWT_ACCESS_SECRET], ['JWT_REFRESH_SECRET', data.JWT_REFRESH_SECRET]] as const) {
+      if (value.includes('development_') || value.length < 32) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${name} must be a random secret of at least 32 characters in production.`, path: [name] });
+      }
+    }
+
+    if (!data.WEB_URL.startsWith('https://')) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'WEB_URL must use HTTPS in production.', path: ['WEB_URL'] });
+    }
+  }
+
+  if (data.JWT_ACCESS_SECRET === data.JWT_REFRESH_SECRET) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'JWT access and refresh secrets must be different.', path: ['JWT_REFRESH_SECRET'] });
   }
 });
 

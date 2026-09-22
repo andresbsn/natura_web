@@ -21,6 +21,7 @@ accountsRouter.get('/me', async (req, res, next) => {
       where: { customerAccountId: account.id },
       orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }],
       take: 80,
+      include: { payment: { select: { method: true } }, order: { select: { orderNumber: true } } },
     });
 
     res.json({ account: mapCustomerAccount(account), movements: movements.map(mapAccountMovement) });

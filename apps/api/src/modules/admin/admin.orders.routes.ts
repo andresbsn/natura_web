@@ -1,20 +1,22 @@
 import { CustomerAccountMovementType, OrderStatus, Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
-import { createLedgerMovement } from '../accounts/account-ledger.js';
+import { calculateCancellationEffect, calculatePaymentReversalEffect, calculatePaymentStatus, canReduceOrderTotal, createLedgerMovement, isUniqueConstraintError, reclassifyPaymentsForCancellation, reclassifyPaymentsForReducedTotal, runAccountingTransaction, splitPayment, totalAdjustmentMovementKey } from '../accounts/account-ledger.js';
 import { requireAuth, requireRole } from '../auth/auth.middleware.js';
 import { sendOrderStatusEmail, sendPaymentReceiptEmail } from '../notifications/order-email-notifications.js';
-import { mapOrder, orderInclude } from '../orders/order.mappers.js';
-import { RESERVED_ORDER_STATUSES, assertAdminOrderStatusTransition, orderItemQuantityDiffs, orderStockAction, recalculateOrderItems } from '../orders/order-stock.js';
+import { formatOrderNumber, mapOrder, orderInclude } from '../orders/order.mappers.js';
+import { RESERVED_ORDER_STATUSES, assertAdminOrderStatusTransition, assertOrderIsMutable, orderItemQuantityDiffs, orderStockAction, recalculateOrderItems } from '../orders/order-stock.js';
 
 export const adminOrdersRouter = Router();
 
 adminOrdersRouter.use(requireAuth, requireRole('ADMIN', 'SUPER_ADMIN'));
 
 const orderUpdateSchema = z.object({
+  idempotencyKey: z.string().trim().min(8).max(120).optional(),
   status: z.nativeEnum(OrderStatus).optional(),
   deliveryMethodId: z.string().uuid().nullable().optional(),
   deliveryAddress: z.string().max(300).nullable().optional(),
@@ -24,6 +26,7 @@ const orderUpdateSchema = z.object({
 
 const paymentSchema = z.object({
   amount: z.number().positive(),
+  idempotencyKey: z.string().trim().min(8).max(120),
   method: z.enum(['efectivo', 'transferencia', 'debito', 'credito']),
   notes: z.string().max(600).optional(),
 });
@@ -42,6 +45,21 @@ const deliveryMethodSchema = z.object({
 
 function auditJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+async function orderPaymentStatus(tx: Prisma.TransactionClient, orderId: string, total: Prisma.Decimal) {
+  const [payments, historicalPayments, applications, historicalApplications] = await Promise.all([
+    tx.payment.aggregate({ where: { orderId, status: { not: 'REFUNDED' } }, _sum: { appliedAmount: true }, _count: true }),
+    tx.payment.count({ where: { orderId } }),
+    tx.creditApplication.aggregate({ where: { destinationOrderId: orderId, reversedAt: null }, _sum: { remainingAmount: true }, _count: true }),
+    tx.creditApplication.count({ where: { destinationOrderId: orderId } }),
+  ]);
+  return calculatePaymentStatus(
+    total,
+    payments._sum.appliedAmount ?? new Prisma.Decimal(0),
+    applications._sum.remainingAmount ?? new Prisma.Decimal(0),
+    historicalPayments > 0 || historicalApplications > 0,
+  );
 }
 
 function mapDeliveryMethod(method: {
@@ -105,31 +123,42 @@ adminOrdersRouter.patch('/delivery-methods/:id', async (req, res, next) => {
   }
 });
 
-adminOrdersRouter.get('/orders', async (_req, res, next) => {
+adminOrdersRouter.get('/orders', async (req, res, next) => {
   try {
-    const orders = await prisma.order.findMany({
-      orderBy: { createdAt: 'desc' },
-      include: orderInclude,
-    });
+    const query = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25), status: z.nativeEnum(OrderStatus).optional(), search: z.string().trim().min(1).max(120).optional() }).parse(req.query);
+    const paginate = req.query.page !== undefined || req.query.pageSize !== undefined;
+    const parsedSearchOrderNumber = query.search && /^\d+$/.test(query.search) ? Number(query.search) : undefined;
+    const searchOrderNumber = parsedSearchOrderNumber !== undefined && Number.isSafeInteger(parsedSearchOrderNumber) ? parsedSearchOrderNumber : undefined;
+    const where = { ...(query.status ? { status: query.status } : {}), ...(query.search ? { OR: [{ id: { contains: query.search, mode: 'insensitive' as const } }, { customerEmail: { contains: query.search, mode: 'insensitive' as const } }, ...(searchOrderNumber === undefined ? [] : [{ orderNumber: searchOrderNumber }])] } : {}) };
+    const [orders, total] = await prisma.$transaction([
+      prisma.order.findMany({ where, orderBy: { createdAt: 'desc' }, include: orderInclude, ...(paginate ? { skip: (query.page - 1) * query.pageSize, take: query.pageSize } : {}) }),
+      prisma.order.count({ where }),
+    ]);
 
-    res.json({ orders: orders.map(mapOrder) });
+    res.json({ orders: orders.map(mapOrder), pagination: { page: query.page, pageSize: paginate ? query.pageSize : total, total, totalPages: paginate ? Math.ceil(total / query.pageSize) : 1 } });
   } catch (error) {
     next(error);
   }
 });
 
 adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
+  let id = '';
+  let data = {} as z.infer<typeof orderUpdateSchema>;
   try {
-    const id = z.string().uuid().parse(req.params.id);
-    const data = orderUpdateSchema.parse(req.body);
+    id = z.string().uuid().parse(req.params.id);
+    data = orderUpdateSchema.parse(req.body);
     let previousStatus: OrderStatus | null = null;
 
-    const order = await prisma.$transaction(async (tx) => {
+    const order = await runAccountingTransaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${id} FOR UPDATE`;
       const existing = await tx.order.findUnique({ where: { id }, include: orderInclude });
 
       if (!existing) {
         throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+      }
+
+      if (existing.status === 'CANCELLED') {
+        assertOrderIsMutable(existing.status);
       }
 
       previousStatus = existing.status;
@@ -222,17 +251,46 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
       }
 
       const nextTotal = nextSubtotal.add(deliveryCost);
-      const paidTotal = existing.payments.filter((payment) => payment.status !== 'REFUNDED').reduce((total, payment) => total.add(payment.amount), new Prisma.Decimal(0));
-      const nextPaymentStatus = paidTotal.equals(0)
-        ? existing.payments.length > 0 && existing.payments.every((payment) => payment.status === 'REFUNDED') ? 'REFUNDED' : 'UNPAID'
-        : paidTotal.greaterThanOrEqualTo(nextTotal)
-          ? 'PAID'
-          : 'PARTIALLY_PAID';
+      if (data.status === 'CANCELLED' && !nextTotal.equals(existing.total)) {
+        throw new AppError(409, 'Cancel the order before changing its total', 'ORDER_TOTAL_LOCKED');
+      }
+      const activeApplicationTotal = await tx.creditApplication.aggregate({ where: { destinationOrderId: id, reversedAt: null }, _sum: { remainingAmount: true } });
+      const activeCreditApplied = activeApplicationTotal._sum.remainingAmount ?? new Prisma.Decimal(0);
+      if (!canReduceOrderTotal(nextTotal, activeCreditApplied)) {
+        throw new AppError(409, 'Order total cannot be lower than active applied credit', 'ORDER_TOTAL_BELOW_APPLIED_CREDIT');
+      }
+      let totalAdjustmentDebtDelta = new Prisma.Decimal(0);
+      let totalAdjustmentCreditDelta = new Prisma.Decimal(0);
+      const totalAdjustmentKey = data.idempotencyKey ?? randomUUID();
+      if (!nextTotal.equals(existing.total)) {
+        const existingAdjustment = await tx.customerAccountMovement.findUnique({ where: { idempotencyKey: totalAdjustmentMovementKey(id, totalAdjustmentKey) } });
+        if (existingAdjustment) {
+          throw new AppError(409, 'Idempotency key was already used for another total adjustment', 'IDEMPOTENCY_KEY_CONFLICT');
+        }
+        if (nextTotal.lessThan(existing.total)) {
+          await tx.$queryRaw`SELECT id FROM "Payment" WHERE "orderId" = ${id} ORDER BY "createdAt", id FOR UPDATE`;
+          const payments = await tx.payment.findMany({ where: { orderId: id }, select: { id: true, amount: true, appliedAmount: true, creditAmount: true, status: true, createdAt: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+          const reclassified = reclassifyPaymentsForReducedTotal(payments, nextTotal, activeCreditApplied);
+          const oldApplied = payments.filter((payment) => payment.status !== 'REFUNDED').reduce((sum, payment) => sum.add(payment.appliedAmount), new Prisma.Decimal(0));
+          const oldCredit = payments.filter((payment) => payment.status !== 'REFUNDED').reduce((sum, payment) => sum.add(payment.creditAmount), new Prisma.Decimal(0));
+          const newApplied = reclassified.reduce((sum, payment) => sum.add(payment.appliedAmount), new Prisma.Decimal(0));
+          const newCredit = reclassified.reduce((sum, payment) => sum.add(payment.creditAmount), new Prisma.Decimal(0));
+          for (const payment of reclassified) {
+            await tx.payment.update({ where: { id: payment.id }, data: { appliedAmount: payment.appliedAmount, creditAmount: payment.creditAmount } });
+          }
+          totalAdjustmentDebtDelta = nextTotal.sub(existing.total).sub(newApplied.sub(oldApplied));
+          totalAdjustmentCreditDelta = newCredit.sub(oldCredit);
+        } else {
+          totalAdjustmentDebtDelta = nextTotal.sub(existing.total);
+        }
+      }
+      const nextPaymentStatus = await orderPaymentStatus(tx, id, nextTotal);
 
-      const updated = await tx.order.update({
+      let updated = await tx.order.update({
         where: { id },
         data: {
           status: data.status,
+          deliveredAt: data.status === 'DELIVERED' && existing.status !== 'DELIVERED' ? new Date() : undefined,
           paymentStatus: nextPaymentStatus,
           deliveryMethodId: data.deliveryMethodId === undefined ? undefined : nextDeliveryMethod?.id ?? null,
           deliveryAddress: data.deliveryAddress,
@@ -247,29 +305,74 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
       });
 
       if (updated.status === 'CANCELLED' && existing.status !== 'CANCELLED') {
-        await createLedgerMovement(tx, {
+        const cancellationPaymentRows = await tx.payment.findMany({
+          where: { orderId: id, status: { not: 'REFUNDED' }, reversedAt: null },
+          select: { id: true, appliedAmount: true, creditAmount: true, status: true, reversedAt: true },
+        });
+        const appliedCredits = await tx.creditApplication.findMany({ where: { destinationOrderId: id } });
+        const appliedPaymentAmount = cancellationPaymentRows.reduce((sum, payment) => sum.add(payment.appliedAmount), new Prisma.Decimal(0));
+        for (const payment of reclassifyPaymentsForCancellation(cancellationPaymentRows)) {
+          await tx.payment.update({ where: { id: payment.id }, data: { appliedAmount: payment.appliedAmount, creditAmount: payment.creditAmount } });
+        }
+        const appliedCreditAmount = appliedCredits.reduce((sum, application) => sum.add(application.remainingAmount), new Prisma.Decimal(0));
+        const cancellationEffect = calculateCancellationEffect(existing.total, appliedPaymentAmount, appliedCreditAmount);
+        const outstandingDebt = cancellationEffect.debtToRelease;
+        if (outstandingDebt.greaterThan(0) || appliedPaymentAmount.greaterThan(0)) {
+          await createLedgerMovement(tx, {
           customerId: existing.customerId,
           orderId: id,
           actorId: req.user!.id,
           type: CustomerAccountMovementType.ORDER_CANCEL_CREDIT,
           direction: 'CREDIT',
-          amount: existing.total,
-          description: `Credito por cancelacion admin del pedido ${id.slice(0, 8)}`,
+          amount: outstandingDebt.greaterThan(0) ? outstandingDebt : appliedPaymentAmount,
+          debtDelta: outstandingDebt.greaterThan(0) ? outstandingDebt.mul(-1) : new Prisma.Decimal(0),
+          creditDelta: appliedPaymentAmount,
+          description: `Reversion del saldo pendiente por cancelacion del pedido ${id.slice(0, 8)}`,
           idempotencyKey: `order:${id}:cancel-credit`,
           metadata: auditJson({ source: 'admin_cancel', previousStatus: existing.status }),
-        });
-      } else if (!updated.total.equals(existing.total)) {
-        const isDebit = updated.total.greaterThan(existing.total);
+          });
+        }
+
+        for (const application of appliedCredits.filter((candidate) => candidate.remainingAmount.greaterThan(0))) {
+          await tx.creditApplication.update({
+            where: { id: application.id },
+            data: { remainingAmount: 0, reversedAt: new Date(), reversedById: req.user!.id, reversalReason: 'Pedido cancelado por admin' },
+          });
+          await tx.paymentCreditAllocation.updateMany({
+            where: { creditApplicationId: application.id, reversedAt: null },
+            data: { reversedAt: new Date(), reversedById: req.user!.id, reversalReason: 'Pedido destino cancelado' },
+          });
+          await createLedgerMovement(tx, {
+            customerId: existing.customerId,
+            orderId: id,
+            actorId: req.user!.id,
+            type: CustomerAccountMovementType.CREDIT_APPLICATION_REVERSAL,
+            direction: 'CREDIT',
+            amount: application.remainingAmount,
+            debtDelta: new Prisma.Decimal(0),
+            creditDelta: application.remainingAmount,
+            description: `Reversion de credito aplicado por cancelacion del pedido ${id.slice(0, 8)}`,
+            idempotencyKey: `credit-application:${application.id}:cancel-reversal`,
+            metadata: auditJson({ source: 'admin_cancel', applicationId: application.id }),
+          });
+        }
+        const finalPaymentStatus = await orderPaymentStatus(tx, id, existing.total);
+        updated = await tx.order.update({ where: { id }, data: { paymentStatus: finalPaymentStatus }, include: orderInclude });
+      } else if (!totalAdjustmentDebtDelta.equals(0) || !totalAdjustmentCreditDelta.equals(0)) {
+        const isDebit = totalAdjustmentDebtDelta.greaterThan(0) || (totalAdjustmentDebtDelta.equals(0) && totalAdjustmentCreditDelta.lessThan(0));
+        const movementAmount = Prisma.Decimal.max(totalAdjustmentDebtDelta.abs(), totalAdjustmentCreditDelta.abs());
         await createLedgerMovement(tx, {
           customerId: existing.customerId,
           orderId: id,
           actorId: req.user!.id,
           type: isDebit ? CustomerAccountMovementType.MANUAL_DEBIT_ADJUSTMENT : CustomerAccountMovementType.MANUAL_CREDIT_ADJUSTMENT,
           direction: isDebit ? 'DEBIT' : 'CREDIT',
-          amount: isDebit ? updated.total.sub(existing.total) : existing.total.sub(updated.total),
+          amount: movementAmount,
+          debtDelta: totalAdjustmentDebtDelta,
+          creditDelta: totalAdjustmentCreditDelta,
           description: `Ajuste de cuenta por edicion del pedido ${id.slice(0, 8)}`,
-          idempotencyKey: `order:${id}:total-adjustment:${Date.now()}`,
-          metadata: auditJson({ source: 'admin_order_edit', previousTotal: existing.total, nextTotal: updated.total }),
+          idempotencyKey: totalAdjustmentMovementKey(id, totalAdjustmentKey),
+          metadata: auditJson({ source: 'admin_order_edit', previousTotal: existing.total, nextTotal: updated.total, requestKey: totalAdjustmentKey }),
         });
       }
 
@@ -318,6 +421,7 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
     if (data.status && previousStatus && data.status !== previousStatus) {
       await sendOrderStatusEmail({
         orderId: order.id,
+        orderNumber: order.orderNumber,
         customerId: order.customerId,
         customerEmail: order.customerEmail,
         customerFirstName: order.customerFirstName,
@@ -329,16 +433,31 @@ adminOrdersRouter.patch('/orders/:id', async (req, res, next) => {
 
     res.json({ order: mapOrder(order) });
   } catch (error) {
+    if (isUniqueConstraintError(error) && data.idempotencyKey) {
+      const movement = await prisma.customerAccountMovement.findUnique({ where: { idempotencyKey: totalAdjustmentMovementKey(id, data.idempotencyKey) } });
+      const metadata = movement?.metadata as { requestKey?: string } | null;
+      if (movement && metadata?.requestKey === data.idempotencyKey) {
+        const existingOrder = await prisma.order.findUnique({ where: { id }, include: orderInclude });
+        if (existingOrder) {
+          res.json({ order: mapOrder(existingOrder) });
+          return;
+        }
+      }
+      next(new AppError(409, 'Idempotency key was already used for another total adjustment', 'IDEMPOTENCY_KEY_CONFLICT'));
+      return;
+    }
     next(error);
   }
 });
 
 adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
+  let id = '';
+  let data = {} as z.infer<typeof paymentSchema>;
   try {
-    const id = z.string().uuid().parse(req.params.id);
-    const data = paymentSchema.parse(req.body);
+    id = z.string().uuid().parse(req.params.id);
+    data = paymentSchema.parse(req.body);
 
-    const order = await prisma.$transaction(async (tx) => {
+    const order = await runAccountingTransaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${id} FOR UPDATE`;
       const existing = await tx.order.findUnique({ where: { id } });
 
@@ -346,14 +465,40 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
         throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
       }
 
-      const paidTotal = await tx.payment.aggregate({ where: { orderId: id, status: { not: 'REFUNDED' } }, _sum: { amount: true } });
-      const nextPaidTotal = (paidTotal._sum.amount ?? new Prisma.Decimal(0)).add(data.amount);
-      const nextStatus = nextPaidTotal.greaterThanOrEqualTo(existing.total) ? 'PAID' : 'PARTIALLY_PAID';
+      const existingPayment = await tx.payment.findUnique({ where: { idempotencyKey: data.idempotencyKey } });
+      if (existingPayment) {
+        if (existingPayment.orderId !== id || !existingPayment.amount.equals(data.amount) || existingPayment.method !== data.method || existingPayment.notes !== (data.notes ?? null)) {
+          throw new AppError(409, 'Idempotency key was already used with a different payment', 'IDEMPOTENCY_KEY_CONFLICT');
+        }
+        return tx.order.findUniqueOrThrow({ where: { id }, include: orderInclude });
+      }
+
+       assertOrderIsMutable(existing.status);
+       if (existing.status === 'PENDING') {
+         throw new AppError(409, 'Payments require an approved order', 'ORDER_NOT_APPROVED');
+       }
+
+
+      const currentPayments = await tx.payment.aggregate({ where: { orderId: id, status: { not: 'REFUNDED' } }, _sum: { appliedAmount: true }, _count: true });
+      const currentApplications = await tx.creditApplication.aggregate({ where: { destinationOrderId: id, reversedAt: null }, _sum: { remainingAmount: true }, _count: true });
+      const currentApplied = currentPayments._sum.appliedAmount ?? new Prisma.Decimal(0);
+      const currentAppliedCredit = currentApplications._sum.remainingAmount ?? new Prisma.Decimal(0);
+      const outstandingDebt = existing.total.sub(currentApplied).sub(currentAppliedCredit);
+      const { appliedAmount, creditAmount } = splitPayment(new Prisma.Decimal(data.amount), outstandingDebt);
+      const nextStatus = calculatePaymentStatus(
+        existing.total,
+        currentApplied.add(appliedAmount),
+        currentAppliedCredit,
+        true,
+      );
       const payment = await tx.payment.create({
         data: {
           orderId: id,
           registeredById: req.user!.id,
           amount: data.amount,
+          idempotencyKey: data.idempotencyKey,
+          appliedAmount,
+          creditAmount,
           status: nextStatus,
           method: data.method,
           notes: data.notes,
@@ -369,6 +514,8 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
         type: CustomerAccountMovementType.PAYMENT_CREDIT,
         direction: 'CREDIT',
         amount: data.amount,
+        debtDelta: appliedAmount.mul(-1),
+        creditDelta: creditAmount,
         description: `Pago registrado para pedido ${id.slice(0, 8)}`,
         idempotencyKey: `payment:${payment.id}:credit`,
         metadata: auditJson({ source: 'admin_payment', method: data.method }),
@@ -395,6 +542,18 @@ adminOrdersRouter.post('/orders/:id/payments', async (req, res, next) => {
 
     res.status(201).json({ order: mapOrder(order) });
   } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      const existingPayment = await prisma.payment.findUnique({ where: { idempotencyKey: data.idempotencyKey } });
+      if (existingPayment && existingPayment.orderId === id && existingPayment.amount.equals(data.amount) && existingPayment.method === data.method && existingPayment.notes === (data.notes ?? null)) {
+        const existingOrder = await prisma.order.findUnique({ where: { id }, include: orderInclude });
+        if (existingOrder) {
+          res.status(201).json({ order: mapOrder(existingOrder) });
+          return;
+        }
+      }
+      next(new AppError(409, 'Idempotency key was already used with a different payment', 'IDEMPOTENCY_KEY_CONFLICT'));
+      return;
+    }
     next(error);
   }
 });
@@ -405,7 +564,7 @@ adminOrdersRouter.post('/orders/:id/payments/:paymentId/reverse', async (req, re
     const paymentId = z.string().uuid().parse(req.params.paymentId);
     const data = paymentReversalSchema.parse(req.body);
 
-    const order = await prisma.$transaction(async (tx) => {
+    const order = await runAccountingTransaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
       await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${paymentId} FOR UPDATE`;
       const payment = await tx.payment.findFirst({ where: { id: paymentId, orderId } });
@@ -419,11 +578,21 @@ adminOrdersRouter.post('/orders/:id/payments/:paymentId/reverse', async (req, re
       }
 
       const existingOrder = await tx.order.findUnique({ where: { id: orderId } });
-      if (!existingOrder) {
-        throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
-      }
+       if (!existingOrder) {
+         throw new AppError(404, 'Order not found', 'ORDER_NOT_FOUND');
+       }
 
-      const reversedAt = new Date();
+       if (existingOrder.status === 'CANCELLED') {
+         throw new AppError(409, 'Payments from cancelled orders cannot be reversed', 'PAYMENT_REVERSAL_ORDER_CANCELLED');
+       }
+
+       const reversedAt = new Date();
+      const activeAllocations = await tx.paymentCreditAllocation.findMany({
+        where: { paymentId, reversedAt: null },
+        include: { creditApplication: true },
+      });
+      const allocatedCredit = activeAllocations.reduce((sum, allocation) => sum.add(allocation.amount), new Prisma.Decimal(0));
+       const reversalEffect = calculatePaymentReversalEffect(payment.appliedAmount, payment.creditAmount, allocatedCredit, false);
       const reversedPayment = await tx.payment.update({
         where: { id: paymentId },
         data: { status: 'REFUNDED', reversedAt, reversedById: req.user!.id, reversalReason: data.reason },
@@ -437,19 +606,54 @@ adminOrdersRouter.post('/orders/:id/payments/:paymentId/reverse', async (req, re
         type: CustomerAccountMovementType.PAYMENT_REFUND_DEBIT,
         direction: 'DEBIT',
         amount: payment.amount,
-        description: `Reverso del pago ${paymentId.slice(0, 8)} del pedido ${orderId.slice(0, 8)}`,
+        debtDelta: reversalEffect.debtToRestore,
+        creditDelta: reversalEffect.creditToRemove.mul(-1),
+        description: `Reverso del pago ${paymentId.slice(0, 8)} del pedido ${formatOrderNumber(existingOrder.orderNumber)}`,
         idempotencyKey: `payment:${paymentId}:refund`,
         metadata: auditJson({ source: 'admin_payment_reversal', reason: data.reason }),
         occurredAt: reversedAt,
       });
 
-      const remainingPayments = await tx.payment.findMany({ where: { orderId, status: { not: 'REFUNDED' } }, select: { amount: true } });
-      const remainingPaidTotal = remainingPayments.reduce((total, candidate) => total.add(candidate.amount), new Prisma.Decimal(0));
-      const nextPaymentStatus = remainingPayments.length === 0
-        ? 'REFUNDED'
-        : remainingPaidTotal.greaterThanOrEqualTo(existingOrder.total)
-          ? 'PAID'
-          : 'PARTIALLY_PAID';
+      const affectedDestinationOrders = new Set<string>();
+      for (const allocation of activeAllocations) {
+        const remainingAmount = allocation.creditApplication.remainingAmount.sub(allocation.amount);
+        await tx.creditApplication.update({
+          where: { id: allocation.creditApplicationId },
+          data: {
+            remainingAmount,
+            reversedAt: remainingAmount.equals(0) ? reversedAt : null,
+            reversedById: remainingAmount.equals(0) ? req.user!.id : null,
+            reversalReason: remainingAmount.equals(0) ? `Pago ${paymentId} reversado` : null,
+          },
+        });
+        await tx.paymentCreditAllocation.update({
+          where: { id: allocation.id },
+          data: { reversedAt, reversedById: req.user!.id, reversalReason: data.reason },
+        });
+        await createLedgerMovement(tx, {
+          customerId: existingOrder.customerId,
+          orderId: allocation.creditApplication.destinationOrderId,
+          paymentId,
+          actorId: req.user!.id,
+          type: CustomerAccountMovementType.PAYMENT_REFUND_DEBIT,
+          direction: 'DEBIT',
+          amount: allocation.amount,
+          debtDelta: allocation.amount,
+          creditDelta: 0,
+          description: `Restauracion de deuda por credito aplicado del pago ${paymentId.slice(0, 8)}`,
+          idempotencyKey: `payment:${paymentId}:refund:allocation:${allocation.id}`,
+          metadata: auditJson({ source: 'admin_payment_reversal', allocationId: allocation.id, reason: data.reason }),
+          occurredAt: reversedAt,
+        });
+        affectedDestinationOrders.add(allocation.creditApplication.destinationOrderId);
+      }
+      for (const destinationOrderId of affectedDestinationOrders) {
+        const destination = await tx.order.findUniqueOrThrow({ where: { id: destinationOrderId }, select: { total: true } });
+        const paymentStatus = await orderPaymentStatus(tx, destinationOrderId, destination.total);
+        await tx.order.update({ where: { id: destinationOrderId }, data: { paymentStatus } });
+      }
+
+      const nextPaymentStatus = await orderPaymentStatus(tx, orderId, existingOrder.total);
       const updatedOrder = await tx.order.update({ where: { id: orderId }, data: { paymentStatus: nextPaymentStatus }, include: orderInclude });
 
       await tx.auditLog.create({
@@ -485,7 +689,7 @@ adminOrdersRouter.post('/orders/:id/payment-receipt-email', async (req, res, nex
       throw new AppError(409, 'Payment receipt requires at least one registered payment', 'NO_PAYMENTS_FOR_RECEIPT');
     }
 
-    const result = await sendPaymentReceiptEmail({ ...order, orderId: order.id }, req.user!.id);
+    const result = await sendPaymentReceiptEmail({ ...order, orderId: order.id, orderNumber: order.orderNumber }, req.user!.id);
     res.json({ notification: result });
   } catch (error) {
     next(error);

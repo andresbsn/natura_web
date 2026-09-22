@@ -4,10 +4,11 @@ import { z } from 'zod';
 
 import { prisma } from '../../db/prisma.js';
 import { AppError } from '../../http/errors.js';
-import { createLedgerMovement } from '../accounts/account-ledger.js';
+import { calculateCancellationEffect, calculateCancelledPaymentStatus, createLedgerMovement, reclassifyPaymentsForCancellation, runAccountingTransaction } from '../accounts/account-ledger.js';
 import { requireAuth, requireRole, requireVerifiedActiveUser } from '../auth/auth.middleware.js';
-import { mapOrder, orderInclude } from './order.mappers.js';
+import { formatOrderNumber, mapOrder, orderInclude } from './order.mappers.js';
 import { RESERVED_ORDER_STATUSES, recalculateOrderItems } from './order-stock.js';
+import { sendOrderCreatedEmails } from '../notifications/order-email-notifications.js';
 
 export const ordersRouter = Router();
 
@@ -44,7 +45,7 @@ ordersRouter.get('/', async (req, res, next) => {
 ordersRouter.post('/', async (req, res, next) => {
   try {
     const data = orderCreateSchema.parse(req.body);
-    const order = await prisma.$transaction(async (tx) => {
+    const order = await runAccountingTransaction(async (tx) => {
       const customer = await tx.user.findUnique({ where: { id: req.user!.id } });
 
       if (!customer || !customer.isActive) {
@@ -157,7 +158,7 @@ ordersRouter.post('/', async (req, res, next) => {
         type: CustomerAccountMovementType.ORDER_CHARGE,
         direction: 'DEBIT',
         amount: total,
-        description: `Cargo por pedido ${created.id.slice(0, 8)}`,
+         description: `Cargo por pedido ${formatOrderNumber(created.orderNumber)}`,
         idempotencyKey: `order:${created.id}:charge`,
         metadata: { source: 'order_create' },
         occurredAt: created.createdAt,
@@ -165,6 +166,8 @@ ordersRouter.post('/', async (req, res, next) => {
 
       return created;
     });
+
+    void sendOrderCreatedEmails({ orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId, customerEmail: order.customerEmail, customerFirstName: order.customerFirstName, total: order.total });
 
     res.status(201).json({ order: mapOrder(order) });
   } catch (error) {
@@ -175,7 +178,7 @@ ordersRouter.post('/', async (req, res, next) => {
 ordersRouter.patch('/:id/cancel', async (req, res, next) => {
   try {
     const id = z.string().uuid().parse(req.params.id);
-    const order = await prisma.$transaction(async (tx) => {
+    const order = await runAccountingTransaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${id} FOR UPDATE`;
       const existing = await tx.order.findFirst({
         where: { id, customerId: req.user!.id },
@@ -190,7 +193,7 @@ ordersRouter.patch('/:id/cancel', async (req, res, next) => {
         throw new AppError(409, 'Only pending orders can be cancelled by customer', 'ORDER_NOT_CANCELLABLE');
       }
 
-      const updated = await tx.order.update({
+      await tx.order.update({
         where: { id },
         data: { status: 'CANCELLED', cancelledAt: new Date() },
         include: orderInclude,
@@ -207,19 +210,54 @@ ordersRouter.patch('/:id/cancel', async (req, res, next) => {
         })),
       });
 
+       const cancellationPaymentRows = await tx.payment.findMany({
+         where: { orderId: id, status: { not: 'REFUNDED' }, reversedAt: null },
+         select: { id: true, appliedAmount: true, creditAmount: true, status: true, reversedAt: true },
+       });
+       const cancellationPayments = { _count: cancellationPaymentRows.length };
+       const appliedCredits = await tx.creditApplication.findMany({ where: { destinationOrderId: id, reversedAt: null } });
+       const appliedPaymentAmount = cancellationPaymentRows.reduce((sum, payment) => sum.add(payment.appliedAmount), new Prisma.Decimal(0));
+       for (const payment of reclassifyPaymentsForCancellation(cancellationPaymentRows)) {
+         await tx.payment.update({ where: { id: payment.id }, data: { appliedAmount: payment.appliedAmount, creditAmount: payment.creditAmount } });
+       }
+      const appliedCreditAmount = appliedCredits.reduce((sum, application) => sum.add(application.remainingAmount), new Prisma.Decimal(0));
+      const cancellationEffect = calculateCancellationEffect(existing.total, appliedPaymentAmount, appliedCreditAmount);
+      if (cancellationEffect.debtToRelease.greaterThan(0) || appliedPaymentAmount.greaterThan(0)) {
       await createLedgerMovement(tx, {
         customerId: existing.customerId,
         orderId: id,
         actorId: req.user!.id,
         type: CustomerAccountMovementType.ORDER_CANCEL_CREDIT,
         direction: 'CREDIT',
-        amount: existing.total,
+        amount: cancellationEffect.debtToRelease.greaterThan(0) ? cancellationEffect.debtToRelease : appliedPaymentAmount,
+        debtDelta: cancellationEffect.debtToRelease.mul(-1),
+        creditDelta: appliedPaymentAmount,
         description: `Credito por cancelacion del pedido ${id.slice(0, 8)}`,
         idempotencyKey: `order:${id}:cancel-credit`,
         metadata: { source: 'customer_cancel' },
       });
+      }
+      for (const application of appliedCredits.filter((candidate) => candidate.remainingAmount.greaterThan(0))) {
+        await tx.creditApplication.update({ where: { id: application.id }, data: { remainingAmount: 0, reversedAt: new Date(), reversedById: req.user!.id, reversalReason: 'Pedido destino cancelado' } });
+        await tx.paymentCreditAllocation.updateMany({ where: { creditApplicationId: application.id, reversedAt: null }, data: { reversedAt: new Date(), reversedById: req.user!.id, reversalReason: 'Pedido destino cancelado' } });
+        await createLedgerMovement(tx, {
+          customerId: existing.customerId,
+          orderId: id,
+          actorId: req.user!.id,
+          type: CustomerAccountMovementType.CREDIT_APPLICATION_REVERSAL,
+          direction: 'CREDIT',
+          amount: application.remainingAmount,
+          debtDelta: 0,
+          creditDelta: application.remainingAmount,
+          description: `Reversion de credito aplicado por cancelacion del pedido ${id.slice(0, 8)}`,
+          idempotencyKey: `credit-application:${application.id}:cancel-reversal`,
+          metadata: { source: 'customer_cancel', applicationId: application.id },
+        });
+      }
+       const nextPaymentStatus = calculateCancelledPaymentStatus(existing.total, cancellationPayments._count > 0 || appliedCredits.length > 0);
+      const finalOrder = await tx.order.update({ where: { id }, data: { paymentStatus: nextPaymentStatus }, include: orderInclude });
 
-      return updated;
+      return finalOrder;
     });
 
     res.json({ order: mapOrder(order) });

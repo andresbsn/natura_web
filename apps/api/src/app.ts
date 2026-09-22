@@ -16,12 +16,15 @@ import { adminProductsRouter } from './modules/admin/admin.products.routes.js';
 import { adminPromotionsRouter } from './modules/admin/admin.promotions.routes.js';
 import { adminCatalogsRouter } from './modules/admin/admin.catalogs.routes.js';
 import { adminUsersRouter } from './modules/admin/admin.users.routes.js';
+import { adminReportsRouter } from './modules/admin/admin.reports.routes.js';
 import { catalogRouter } from './modules/catalog/catalog.routes.js';
 import { healthRouter } from './modules/health/health.routes.js';
 import { ordersRouter } from './modules/orders/orders.routes.js';
 
 export function createApp() {
   const app = express();
+  // Production API traffic must arrive through the local TLS reverse proxy.
+  app.set('trust proxy', env.NODE_ENV === 'production' ? 1 : false);
   const allowedOrigins = env.CORS_ORIGIN.split(',').map((origin) => origin.trim());
 
   app.disable('x-powered-by');
@@ -61,6 +64,7 @@ export function createApp() {
   app.use('/api/admin', adminPromotionsRouter);
   app.use('/api/admin', adminCatalogsRouter);
   app.use('/api/admin', adminUsersRouter);
+  app.use('/api/admin', adminReportsRouter);
   app.use('/api/catalog', catalogRouter);
   app.use('/api/orders', ordersRouter);
   app.use(notFoundHandler);

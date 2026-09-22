@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 
 import { AppError } from '../../http/errors.js';
-import { RESERVED_ORDER_STATUSES, assertAdminOrderStatusTransition, isReservedOrderStatus, mergeOrderItems, orderItemQuantityDiffs, orderStockAction, recalculateOrderItems } from './order-stock.js';
+import { RESERVED_ORDER_STATUSES, assertAdminOrderStatusTransition, assertOrderIsMutable, isReservedOrderStatus, mergeOrderItems, orderItemQuantityDiffs, orderStockAction, recalculateOrderItems } from './order-stock.js';
 
 describe('order stock rules', () => {
   it('treats pending, confirmed and preparing orders as stock reservations', () => {
@@ -41,6 +41,18 @@ describe('order stock rules', () => {
     expect(() => assertAdminOrderStatusTransition('DELIVERED', 'CANCELLED')).toThrow(AppError);
     expect(() => assertAdminOrderStatusTransition('CANCELLED', 'PENDING')).toThrow(AppError);
     expect(() => assertAdminOrderStatusTransition('DELIVERED', undefined)).not.toThrow();
+  });
+
+  it('locks cancelled orders against administrative mutations', () => {
+    try {
+      assertOrderIsMutable('CANCELLED');
+      throw new Error('expected cancelled order to be immutable');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).statusCode).toBe(409);
+      expect((error as AppError).code).toBe('ORDER_IMMUTABLE');
+    }
+    expect(() => assertOrderIsMutable('PENDING')).not.toThrow();
   });
 
   it('merges duplicate edited items by variant', () => {

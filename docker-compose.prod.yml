@@ -37,8 +37,9 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      ORDER_NOTIFICATION_INTERNAL_RECIPIENTS: ${ORDER_NOTIFICATION_INTERNAL_RECIPIENTS:-}
     ports:
-      - "${API_BIND:-0.0.0.0}:${API_HOST_PORT:-3027}:3000"
+      - "${API_BIND:-127.0.0.1}:${API_HOST_PORT:-3027}:3000"
     volumes:
       - natura_uploads:/app/uploads
 
@@ -53,7 +54,7 @@ services:
     depends_on:
       - api
     ports:
-      - "${WEB_BIND:-0.0.0.0}:${WEB_HOST_PORT:-8097}:80"
+      - "${WEB_BIND:-127.0.0.1}:${WEB_HOST_PORT:-8097}:80"
 
 volumes:
   natura_postgres_data:

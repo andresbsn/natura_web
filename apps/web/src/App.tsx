@@ -1,4 +1,5 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { Toaster, toast } from 'sonner';
 
 type CatalogProduct = {
   id: string;
@@ -45,17 +46,20 @@ type CartItem = {
 
 type Order = {
   id: string;
+  orderNumber: number;
   status: string;
   paymentStatus: string;
-  customer: { email: string; firstName: string; lastName: string; phone: string | null };
+  customer: { id: string; email: string; firstName: string; lastName: string; phone: string | null };
   deliveryMethod: { id: string; name: string; cost: number } | null;
   deliveryAddress: string | null;
   deliveryNotes: string | null;
   subtotal: number;
   deliveryCost: number;
   total: number;
+  outstandingDebt: number;
   items: Array<{ id: string; variantId: string; productName: string; variantName: string; quantity: number; unitPrice: number; lineTotal: number }>;
-  payments: Array<{ id: string; amount: number; status: string; method: string | null; notes: string | null; paidAt: string | null; reversedAt: string | null; reversedById: string | null; reversalReason: string | null; createdAt: string }>;
+  payments: Array<{ id: string; amount: number; appliedAmount: number; creditAmount: number; status: string; method: string | null; notes: string | null; paidAt: string | null; reversedAt: string | null; reversedById: string | null; reversalReason: string | null; createdAt: string }>;
+  creditApplications: Array<{ id: string; amount: number; remainingAmount: number; appliedById: string; appliedAt: string; description: string | null; reversedAt: string | null; reversalReason: string | null }>;
   createdAt: string;
 };
 
@@ -73,6 +77,21 @@ type AdminUser = AuthUser & {
   createdAt: string;
   updatedAt: string;
 };
+
+type AdminReport = {
+  timezone: string;
+  period: { fromInclusive: string; toInclusive: string; toExclusive: string };
+  sales: { orderCount: number; total: number };
+  ordersByStatus: Array<{ status: string; count: number }>;
+  topProducts: Array<{ id?: string; name?: string; sku?: string; product?: { name: string }; quantity: number; total: number }>;
+  lowStock: Array<{ variantId: string; sku: string; name: string; productName: string; stockQuantity: number }>;
+  income: { total: number };
+  salesByDeliveryMethod: Array<{ deliveryMethodId: string | null; count: number; total: number }>;
+  pendingOrders: number;
+};
+
+type AdminReportsData = AdminReport | null;
+type CatalogPagination = { page: number; pageSize: number; total: number; totalPages: number };
 
 type Promotion = {
   id: string;
@@ -102,7 +121,9 @@ type Catalog = {
 type AccountMovement = {
   id: string;
   orderId: string | null;
+  orderNumber: number | null;
   paymentId: string | null;
+  paymentMethod: string | null;
   actorId: string | null;
   type: string;
   direction: 'DEBIT' | 'CREDIT';
@@ -117,6 +138,8 @@ type CustomerAccount = {
   id: string;
   customerId: string;
   currentBalance: number;
+  debt: number;
+  availableCredit: number;
   currency: string;
   lastMovementAt: string | null;
   createdAt: string;
@@ -214,24 +237,70 @@ function isSessionExpiredRedirect(error: unknown) {
   return error instanceof ApiError && error.code === 'SESSION_EXPIRED';
 }
 
+const API_ERROR_MESSAGES: Record<string, string> = {
+  ACCOUNT_BALANCE_INVALID: 'El saldo de la cuenta no puede quedar negativo.',
+  ADMIN_NOT_FOUND: 'No se encontró el administrador.',
+  APPLICATION_EXCEEDS_ORDER_DEBT: 'El importe supera la deuda pendiente del pedido.',
+  AUTH_REQUIRED: 'Necesitas iniciar sesión para continuar.',
+  CATALOG_NOT_FOUND: 'No se encontró el catálogo.',
+  CUSTOMER_ACCOUNT_ONLY: 'La cuenta corriente solo está disponible para clientes.',
+  CUSTOMER_NOT_FOUND: 'No se encontró el cliente.',
+  DELIVERY_METHOD_UNAVAILABLE: 'El método de entrega no está disponible.',
+  EMAIL_VERIFICATION_REQUIRED: 'Necesitas validar tu email antes de continuar.',
+  FORBIDDEN: 'No tienes permisos para realizar esta acción.',
+  IDEMPOTENCY_KEY_CONFLICT: 'La operación ya fue registrada con datos diferentes.',
+  INSUFFICIENT_CREDIT: 'El crédito disponible no alcanza para realizar esta operación.',
+  INVALID_CATALOG_DATES: 'La fecha de inicio debe ser anterior a la fecha de finalización.',
+  INVALID_CREDIT_APPLICATION_AMOUNT: 'El importe del crédito debe ser mayor que cero.',
+  INVALID_CREDENTIALS: 'Email o contraseña incorrectos.',
+  INVALID_EMAIL_VERIFICATION_TOKEN: 'El enlace de validación no es válido o ya venció.',
+  INVALID_PASSWORD_RESET_TOKEN: 'El enlace para restablecer la contraseña no es válido o ya venció.',
+  INVALID_REFRESH_TOKEN: 'La sesión no es válida o ya venció.',
+  INVALID_TOKEN: 'La sesión no es válida o ya venció.',
+  LAST_SUPER_ADMIN: 'Debe quedar al menos un superadministrador activo.',
+  NO_PAYMENTS_FOR_RECEIPT: 'El pedido todavía no tiene pagos registrados para emitir un comprobante.',
+  ORDER_CANCELLABLE: 'Solo se pueden cancelar pedidos pendientes.',
+  ORDER_CUSTOMER_MISMATCH: 'El pedido no pertenece a este cliente.',
+  ORDER_EDIT_STATUS_CONFLICT: 'Edita los productos del pedido antes de cambiar su estado.',
+  ORDER_NOT_APPROVED: 'Para registrar un pago, el pedido debe estar confirmado.',
+  ORDER_NOT_CANCELLABLE: 'Solo se pueden cancelar pedidos pendientes.',
+  ORDER_NOT_EDITABLE: 'Solo se pueden editar pedidos activos con reserva.',
+  ORDER_NOT_FOUND: 'No se encontró el pedido.',
+  ORDER_STATUS_LOCKED: 'Este pedido ya está cerrado y no permite cambiar su estado operativo.',
+  ORDER_TOTAL_BELOW_APPLIED_CREDIT: 'El total del pedido no puede ser menor que el crédito aplicado.',
+  ORDER_TOTAL_LOCKED: 'No se puede cambiar el total de un pedido cerrado.',
+  PAYMENT_ALREADY_REVERSED: 'El pago ya fue reversado.',
+  PAYMENT_NOT_FOUND: 'No se encontró el pago.',
+  PRODUCT_NOT_FOUND: 'No se encontró el producto.',
+  PRODUCT_UNAVAILABLE: 'El producto no está disponible.',
+  PROMOTION_NOT_FOUND: 'No se encontró la promoción.',
+  PROMOTION_TARGET_NOT_FOUND: 'El objetivo de la promoción no existe.',
+  PROMOTION_TARGET_REQUIRED: 'Debes seleccionar un objetivo para la promoción.',
+  SELF_ADMIN_CHANGE_FORBIDDEN: 'No puedes modificar tus propios permisos administrativos.',
+  USER_NOT_FOUND: 'No se encontró el usuario.',
+};
+
+function localizedErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof ApiError && error.code && API_ERROR_MESSAGES[error.code]) return API_ERROR_MESSAGES[error.code];
+  return error instanceof Error ? error.message : fallback;
+}
+
 function authErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof ApiError && error.code === 'EMAIL_ALREADY_REGISTERED') {
-    return 'Ese email ya esta registrado. Inicia sesion o pedi un nuevo enlace de validacion.';
-  }
-
-  if (error instanceof ApiError && error.code === 'EMAIL_VERIFICATION_REQUIRED') {
-    return 'Necesitas validar tu email antes de iniciar sesion. Revisa tu correo o pedi un nuevo enlace.';
-  }
-
-  if (error instanceof ApiError && error.code === 'INVALID_CREDENTIALS') {
-    return 'Email o contrasena incorrectos.';
-  }
+  if (error instanceof ApiError && error.code === 'EMAIL_ALREADY_REGISTERED') return 'Ese email ya está registrado. Inicia sesión o pide un nuevo enlace de validación.';
 
   if (error instanceof ApiError && error.status === 429) {
-    return 'Hubo demasiados intentos. Espera unos minutos y volve a probar.';
+    return 'Hubo demasiados intentos. Espera unos minutos y vuelve a probar.';
   }
 
-  return error instanceof Error ? error.message : fallback;
+  return localizedErrorMessage(error, fallback);
+}
+
+function notifySuccess(message: string) {
+  toast.success(message);
+}
+
+function notifyError(message: string) {
+  toast.error(message);
 }
 
 function imageSource(url: string) {
@@ -240,6 +309,11 @@ function imageSource(url: string) {
 
 function formatPrice(amount: number) {
   return amount.toLocaleString('es-AR', { currency: 'ARS', maximumFractionDigits: 0, style: 'currency' });
+}
+
+function formatOrderNumber(orderNumber: number) {
+  const padded = String(orderNumber).padStart(6, '0');
+  return `${padded.slice(0, 3)}-${padded.slice(3)}`;
 }
 
 const ARGENTINA_TIMEZONE_OFFSET = '-03:00';
@@ -282,7 +356,11 @@ function paymentMethodLabel(method: string | null) {
 }
 
 function effectivePaymentAmount(payments: Order['payments']) {
-  return payments.filter((payment) => payment.status !== 'REFUNDED').reduce((total, payment) => total + payment.amount, 0);
+  return payments.filter((payment) => payment.status !== 'REFUNDED').reduce((total, payment) => total + payment.appliedAmount, 0);
+}
+
+function effectiveCreditAmount(order: Order) {
+  return order.creditApplications.filter((application) => !application.reversedAt).reduce((total, application) => total + application.remainingAmount, 0);
 }
 
 function accountMovementLabel(type: string) {
@@ -292,6 +370,8 @@ function accountMovementLabel(type: string) {
   if (type === 'PAYMENT_REFUND_DEBIT') return 'Reembolso';
   if (type === 'MANUAL_DEBIT_ADJUSTMENT') return 'Ajuste débito';
   if (type === 'MANUAL_CREDIT_ADJUSTMENT') return 'Ajuste crédito';
+  if (type === 'CREDIT_APPLICATION') return 'Crédito aplicado a pedido';
+  if (type === 'CREDIT_APPLICATION_REVERSAL') return 'Crédito devuelto por cancelación';
   return type;
 }
 
@@ -353,8 +433,8 @@ function Nav({ cartCount, user, navigate, path }: { cartCount: number; user: Aut
   );
 }
 
-function ProductCard({ product, onAdd }: { product: CatalogProduct; onAdd: (product: CatalogProduct) => void }) {
-  const variant = productVariant(product);
+function ProductCard({ product, navigate, onAdd }: { product: CatalogProduct; navigate: (path: string) => void; onAdd: (product: CatalogProduct, variantId?: string, quantity?: number) => void }) {
+  const variant = product.variants.find((candidate) => candidate.currentPrice && candidate.availableStock > 0) ?? productVariant(product);
   const image = product.images[0];
 
   return (
@@ -371,9 +451,12 @@ function ProductCard({ product, onAdd }: { product: CatalogProduct; onAdd: (prod
           <small>{variant ? `Disponible: ${variant.availableStock}` : 'Sin variantes'}</small>
         </div>
         {variant?.currentPrice?.promotion ? <small className="promoBadge">{variant.currentPrice.promotion.name} · antes {formatPrice(variant.currentPrice.originalAmount)}</small> : null}
-        <button disabled={!variant || !variant.currentPrice || variant.availableStock < 1} type="button" onClick={() => onAdd(product)}>
-          Agregar al carrito
-        </button>
+        <div className="productCardActions">
+          <button className="addToCartButton" type="button" disabled={!variant || !variant.currentPrice || variant.availableStock < 1} onClick={() => onAdd(product, variant?.id)}>
+            Agregar al carrito
+          </button>
+          <button className="textLink detailLink" type="button" onClick={() => navigate(`/productos/${product.slug}`)}>Ver detalle</button>
+        </div>
       </div>
     </article>
   );
@@ -385,6 +468,10 @@ function Footer() {
       <div>
         <strong>Natura reseller</strong>
         <p>Catalogo de revendedora independiente. No es tienda oficial Natura.</p>
+      </div>
+      <div>
+        <strong>Información</strong>
+        <p><a href="#privacidad">Privacidad</a> · <a href="#terminos">Términos</a> · <a href="#cancelaciones">Cancelaciones y entregas</a>. Se coordinan antes de confirmar.</p>
       </div>
       <div>
         <strong>Contacto</strong>
@@ -401,6 +488,8 @@ function Footer() {
 export function App() {
   const [path, setPath] = useState(() => window.location.pathname);
   const [products, setProducts] = useState<CatalogProduct[]>([]);
+  const [catalogProductCache, setCatalogProductCache] = useState<Record<string, CatalogProduct>>(() => JSON.parse(localStorage.getItem('catalogProductCache') ?? '{}') as Record<string, CatalogProduct>);
+  const [catalogPagination, setCatalogPagination] = useState<CatalogPagination | null>(null);
   const [adminProducts, setAdminProducts] = useState<CatalogProduct[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [deliveryMethods, setDeliveryMethods] = useState<DeliveryMethod[]>([]);
@@ -412,13 +501,27 @@ export function App() {
   const [adminAccounts, setAdminAccounts] = useState<AdminCustomerAccount[]>([]);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [catalogs, setCatalogs] = useState<Catalog[]>([]);
+  const [admins, setAdmins] = useState<AdminUser[]>([]);
+  const [report, setReport] = useState<AdminReportsData>(null);
+  const [productDetail, setProductDetail] = useState<CatalogProduct | null>(null);
+  const [productDetailLoading, setProductDetailLoading] = useState(false);
   const [cart, setCart] = useState<CartItem[]>(() => JSON.parse(localStorage.getItem('cart') ?? '[]') as CartItem[]);
   const [isLoading, setIsLoading] = useState(true);
+  const [authReady, setAuthReady] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
-  const [token, setToken] = useState(() => localStorage.getItem('accessToken') ?? '');
-  const [user, setUser] = useState<AuthUser | null>(() => JSON.parse(localStorage.getItem('user') ?? 'null') as AuthUser | null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [token, setToken] = useState('');
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const refreshPromiseRef = useRef<Promise<string> | null>(null);
+  const sessionGenerationRef = useRef(0);
+  const currentTokenRef = useRef('');
+
+  const storeSession = useCallback((accessToken: string, authUser: AuthUser) => {
+    sessionGenerationRef.current += 1;
+    currentTokenRef.current = accessToken;
+    setToken(accessToken);
+    setUser(authUser);
+  }, []);
 
   const navigate = useCallback((nextPath: string) => {
     window.history.pushState(null, '', nextPath);
@@ -427,8 +530,8 @@ export function App() {
   }, []);
 
   const clearSession = useCallback(() => {
-    localStorage.removeItem('accessToken');
-    localStorage.removeItem('user');
+    sessionGenerationRef.current += 1;
+    currentTokenRef.current = '';
     setToken('');
     setUser(null);
     setOrders([]);
@@ -439,38 +542,81 @@ export function App() {
     setAdminAccounts([]);
     setPromotions([]);
     setCatalogs([]);
+    setAdmins([]);
+    setReport(null);
   }, []);
 
   const expireSession = useCallback(() => {
     clearSession();
     setError(null);
-    setMessage('Tu sesion expiro. Volve a iniciar sesion para continuar.');
+    toast.error('Tu sesion expiro. Volve a iniciar sesion para continuar.');
     navigate('/login');
   }, [clearSession, navigate]);
+
+  const refreshSession = useCallback(() => {
+    const generation = sessionGenerationRef.current;
+    if (!refreshPromiseRef.current) {
+      refreshPromiseRef.current = apiRequest<{ accessToken: string; user: AuthUser }>('/api/auth/refresh', { method: 'POST' })
+        .then((data) => {
+          if (sessionGenerationRef.current === generation) {
+            storeSession(data.accessToken, data.user);
+            return data.accessToken;
+          }
+
+          return currentTokenRef.current;
+        })
+        .finally(() => {
+          refreshPromiseRef.current = null;
+        });
+    }
+
+    return refreshPromiseRef.current;
+  }, [storeSession]);
 
   const authenticatedRequest = useCallback(async <T,>(requestPath: string, options: RequestInit = {}) => {
     try {
       return await apiRequest<T>(requestPath, options);
     } catch (requestError) {
       if (isExpiredSessionError(requestError)) {
-        expireSession();
-        throw new ApiError('Tu sesion expiro. Volve a iniciar sesion para continuar.', 401, 'SESSION_EXPIRED');
+        const requestGeneration = sessionGenerationRef.current;
+        try {
+          const accessToken = await refreshSession();
+          const headers = new Headers(options.headers);
+          headers.set('Authorization', `Bearer ${accessToken}`);
+          return await apiRequest<T>(requestPath, { ...options, headers });
+        } catch {
+          if (sessionGenerationRef.current !== requestGeneration) {
+            throw requestError;
+          }
+
+          expireSession();
+          throw new ApiError('Tu sesion expiro. Volve a iniciar sesion para continuar.', 401, 'SESSION_EXPIRED');
+        }
       }
       throw requestError;
     }
-  }, [expireSession]);
+  }, [expireSession, refreshSession]);
 
-  async function loadCatalog() {
+  async function loadCatalog(page = 1) {
     setIsLoading(true);
     setCatalogError(null);
 
     try {
       const [productsData, categoriesData, deliveryMethodsData] = await Promise.all([
-        apiRequest<{ products: CatalogProduct[] }>('/api/catalog/products'),
+        apiRequest<{ products: CatalogProduct[]; pagination?: CatalogPagination }>(`/api/catalog/products?page=${page}&pageSize=24`),
         apiRequest<{ categories: Category[] }>('/api/catalog/categories'),
         apiRequest<{ deliveryMethods: DeliveryMethod[] }>('/api/catalog/delivery-methods'),
       ]);
       setProducts(productsData.products);
+      let cachedProducts = productsData.products;
+      if (page === 1 && cart.length > 0 && productsData.pagination && productsData.pagination.totalPages > 1) {
+        const remainingPages = await Promise.all(Array.from({ length: productsData.pagination.totalPages - 1 }, (_, index) =>
+          apiRequest<{ products: CatalogProduct[] }>(`/api/catalog/products?page=${index + 2}&pageSize=24`),
+        ));
+        cachedProducts = [productsData.products, ...remainingPages.map((result) => result.products)].flat();
+      }
+      setCatalogProductCache((current) => ({ ...current, ...Object.fromEntries(cachedProducts.map((product) => [product.id, product])) }));
+      setCatalogPagination(productsData.pagination ?? null);
       setCategories(categoriesData.categories);
       setDeliveryMethods(deliveryMethodsData.deliveryMethods);
     } catch (requestError) {
@@ -495,7 +641,7 @@ export function App() {
 
   const loadAdminData = useCallback(async (accessToken = token) => {
     if (!accessToken || !isAdmin(user)) return;
-    const [adminProductsData, adminOrdersData, adminUsersData, deliveryMethodsData, promotionsData, adminAccountsData, catalogsData] = await Promise.all([
+    const results = await Promise.allSettled([
       authenticatedRequest<{ products: CatalogProduct[] }>('/api/admin/products', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ orders: Order[] }>('/api/admin/orders', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ users: AdminUser[] }>('/api/admin/users', { headers: { Authorization: `Bearer ${accessToken}` } }),
@@ -504,14 +650,31 @@ export function App() {
       authenticatedRequest<{ accounts: AdminCustomerAccount[] }>('/api/admin/customer-accounts', { headers: { Authorization: `Bearer ${accessToken}` } }),
       authenticatedRequest<{ catalogs: Catalog[] }>('/api/admin/catalogs', { headers: { Authorization: `Bearer ${accessToken}` } }),
     ]);
-    setAdminProducts(adminProductsData.products);
-    setOrders(adminOrdersData.orders);
-    setAdminUsers(adminUsersData.users);
-    setDeliveryMethods(deliveryMethodsData.deliveryMethods);
-    setPromotions(promotionsData.promotions);
-    setAdminAccounts(adminAccountsData.accounts);
-    setCatalogs(catalogsData.catalogs);
+    if (results[0].status === 'fulfilled') setAdminProducts(results[0].value.products);
+    if (results[1].status === 'fulfilled') setOrders(results[1].value.orders);
+    if (results[2].status === 'fulfilled') setAdminUsers(results[2].value.users);
+    if (results[3].status === 'fulfilled') setDeliveryMethods(results[3].value.deliveryMethods);
+    if (results[4].status === 'fulfilled') setPromotions(results[4].value.promotions);
+    if (results[5].status === 'fulfilled') setAdminAccounts(results[5].value.accounts);
+    if (results[6].status === 'fulfilled') setCatalogs(results[6].value.catalogs);
+    if (user?.role === 'SUPER_ADMIN') {
+      const adminsData = await authenticatedRequest<{ admins: AdminUser[] }>('/api/admin/admins', { headers: { Authorization: `Bearer ${accessToken}` } });
+      setAdmins(adminsData.admins);
+    }
   }, [authenticatedRequest, token, user]);
+
+  const loadProductDetail = useCallback(async (slug: string) => {
+    setProductDetailLoading(true);
+    setCatalogError(null);
+    try {
+      const data = await apiRequest<{ product: CatalogProduct }>(`/api/catalog/products/${encodeURIComponent(slug)}`);
+      setProductDetail(data.product);
+      setCatalogProductCache((current) => ({ ...current, [data.product.id]: data.product }));
+    } catch (requestError) {
+      setProductDetail(null);
+      setCatalogError(requestError instanceof Error ? requestError.message : 'No se pudo cargar el producto');
+    } finally { setProductDetailLoading(false); }
+  }, []);
 
   useEffect(() => {
     const onPopState = () => setPath(window.location.pathname);
@@ -521,29 +684,42 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    void refreshSession()
+      .catch(() => clearSession())
+      .finally(() => setAuthReady(true));
+  }, [clearSession, refreshSession]);
+
+  useEffect(() => {
     localStorage.setItem('cart', JSON.stringify(cart));
   }, [cart]);
 
   useEffect(() => {
-    if (!token) return;
+    localStorage.setItem('catalogProductCache', JSON.stringify(catalogProductCache));
+  }, [catalogProductCache]);
+
+  useEffect(() => {
+    if (!authReady || !token) return;
     void loadOrders(token).catch(() => undefined);
     void loadAccount(token).catch(() => undefined);
-  }, [loadAccount, loadOrders, token]);
+  }, [authReady, loadAccount, loadOrders, token]);
 
   useEffect(() => {
-    if (!token || !isAdmin(user)) return;
+    if (!authReady || !token || !isAdmin(user)) return;
     void loadAdminData(token).catch(() => undefined);
-  }, [loadAdminData, token, user]);
+  }, [authReady, loadAdminData, token, user]);
 
   useEffect(() => {
-    if (!message) return;
-    const timeoutId = window.setTimeout(() => setMessage(null), 1000);
-    return () => window.clearTimeout(timeoutId);
-  }, [message]);
+    const detailSlug = path.match(/^\/productos\/([^/]+)$/)?.[1];
+    if (detailSlug) void loadProductDetail(detailSlug);
+  }, [loadProductDetail, path]);
+
+  useEffect(() => {
+    if (error) notifyError(error);
+  }, [error]);
 
   const cartProducts = cart
     .map((item) => {
-      const product = products.find((candidate) => candidate.variants.some((variant) => variant.id === item.variantId));
+       const product = Object.values(catalogProductCache).find((candidate) => candidate.variants.some((variant) => variant.id === item.variantId));
       const variant = product?.variants.find((candidate) => candidate.id === item.variantId) ?? null;
       return product && variant ? { product, variant, quantity: item.quantity } : null;
     })
@@ -553,18 +729,19 @@ export function App() {
   const selectedProduct = adminProducts.find((product) => product.id === selectedProductId) ?? null;
   const featuredProducts = [...products].sort((a, b) => a.id.localeCompare(b.id)).slice(0, 5);
 
-  function addToCart(product: CatalogProduct) {
-    const variant = productVariant(product);
+  function addToCart(product: CatalogProduct, variantId?: string, requestedQuantity = 1) {
+    const variant = product.variants.find((candidate) => candidate.id === variantId) ?? (variantId ? null : productVariant(product));
     if (!variant || variant.availableStock < 1) return;
+    setCatalogProductCache((current) => ({ ...current, [product.id]: product }));
     setCart((current) => {
       const existing = current.find((item) => item.variantId === variant.id);
       if (existing) {
-        if (existing.quantity >= variant.availableStock) return current;
-        return current.map((item) => (item.variantId === variant.id ? { ...item, quantity: item.quantity + 1 } : item));
+        if (existing.quantity + requestedQuantity > variant.availableStock) return current;
+        return current.map((item) => (item.variantId === variant.id ? { ...item, quantity: item.quantity + requestedQuantity } : item));
       }
-      return [...current, { variantId: variant.id, quantity: 1 }];
+      return [...current, { variantId: variant.id, quantity: Math.min(requestedQuantity, variant.availableStock) }];
     });
-    setMessage(`${product.name} agregado al carrito`);
+    notifySuccess(`${product.name} agregado al carrito`);
   }
 
   function updateCartQuantity(variantId: string, quantity: number) {
@@ -577,17 +754,9 @@ export function App() {
     setCart((current) => current.map((item) => (item.variantId === variantId ? { ...item, quantity: Math.min(quantity, availableStock) } : item)));
   }
 
-  const storeSession = useCallback((accessToken: string, authUser: AuthUser) => {
-    localStorage.setItem('accessToken', accessToken);
-    localStorage.setItem('user', JSON.stringify(authUser));
-    setToken(accessToken);
-    setUser(authUser);
-  }, []);
-
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setMessage(null);
     const form = new FormData(event.currentTarget);
 
     try {
@@ -596,7 +765,7 @@ export function App() {
         body: JSON.stringify({ email: form.get('email'), password: form.get('password') }),
       });
       storeSession(data.accessToken, data.user);
-      setMessage(`Sesion iniciada como ${data.user.firstName}`);
+      notifySuccess(`Sesion iniciada como ${data.user.firstName}`);
       navigate(isAdmin(data.user) ? '/admin/productos' : '/productos');
     } catch (requestError) {
       setError(authErrorMessage(requestError, 'No se pudo iniciar sesion'));
@@ -605,7 +774,6 @@ export function App() {
 
   const handleVerifyEmail = useCallback(async (verificationToken: string) => {
     setError(null);
-    setMessage(null);
 
     try {
       const data = await apiRequest<{ accessToken: string; user: AuthUser }>('/api/auth/verify-email', {
@@ -613,7 +781,7 @@ export function App() {
         body: JSON.stringify({ token: verificationToken }),
       });
       storeSession(data.accessToken, data.user);
-      setMessage('Email verificado. Ya podes confirmar pedidos.');
+      notifySuccess('Email verificado. Ya podes confirmar pedidos.');
       navigate('/productos');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'No se pudo verificar el email');
@@ -623,15 +791,14 @@ export function App() {
   async function handleResendVerification(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setMessage(null);
     const form = new FormData(event.currentTarget);
 
     try {
-      const data = await apiRequest<{ message: string }>('/api/auth/resend-verification', {
+      await apiRequest('/api/auth/resend-verification', {
         method: 'POST',
         body: JSON.stringify({ email: form.get('email') }),
       });
-      setMessage(data.message);
+      notifySuccess('Enlace de validacion enviado.');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'No se pudo reenviar el enlace');
     }
@@ -640,7 +807,6 @@ export function App() {
   async function handleRegister(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setMessage(null);
     const form = new FormData(event.currentTarget);
     const password = String(form.get('password') ?? '');
     const confirmPassword = String(form.get('confirmPassword') ?? '');
@@ -651,7 +817,7 @@ export function App() {
     }
 
     try {
-      const data = await apiRequest<{ emailVerificationRequired: boolean; message: string }>('/api/auth/register', {
+      await apiRequest('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify({
           firstName: form.get('firstName'),
@@ -661,7 +827,7 @@ export function App() {
           password,
         }),
       });
-      setMessage(data.message || 'Registro creado. Te enviamos un email para validar la cuenta antes de iniciar sesion.');
+      notifySuccess('Registro creado. Te enviamos un email para validar la cuenta antes de iniciar sesion.');
       navigate('/login');
     } catch (requestError) {
       setError(authErrorMessage(requestError, 'No se pudo crear el usuario'));
@@ -677,7 +843,6 @@ export function App() {
   async function handleCreateOrder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    setMessage(null);
 
     if (!token) {
       navigate('/login');
@@ -699,35 +864,35 @@ export function App() {
         }),
       });
       setCart([]);
-      setMessage('Pedido creado. La administradora lo va a revisar y confirmar.');
+      notifySuccess('Pedido creado exitosamente. La administradora lo va a revisar y confirmar.');
       await loadOrders();
       await loadAccount();
       navigate('/mis-pedidos');
     } catch (requestError) {
       if (isSessionExpiredRedirect(requestError)) return;
-      setError(requestError instanceof Error ? requestError.message : 'No se pudo crear el pedido');
+      setError(localizedErrorMessage(requestError, 'No se pudo crear el pedido'));
     }
   }
 
   async function cancelOrder(id: string) {
     if (!token) return;
     setError(null);
-    setMessage(null);
 
     try {
       await authenticatedRequest(`/api/orders/${id}/cancel`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } });
-      setMessage('Pedido cancelado. La reserva de stock fue liberada.');
+      notifySuccess('Pedido cancelado exitosamente. La reserva de stock fue liberada.');
       await loadCatalog();
       await loadOrders();
       await loadAccount();
     } catch (requestError) {
       if (isSessionExpiredRedirect(requestError)) return;
-      setError(requestError instanceof Error ? requestError.message : 'No se pudo cancelar el pedido');
+      setError(localizedErrorMessage(requestError, 'No se pudo cancelar el pedido'));
     }
   }
 
   async function handleCreateCategory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     const name = String(form.get('categoryName') ?? '');
     await authenticatedRequest('/api/admin/categories', {
@@ -735,14 +900,16 @@ export function App() {
       headers: { Authorization: `Bearer ${token}` },
       body: JSON.stringify({ name, slug: String(form.get('categorySlug') || slugify(name)) }),
     });
-    event.currentTarget.reset();
+    formElement.reset();
     await loadCatalog();
     await loadAdminData();
     await loadAccount();
+    notifySuccess('Categoría creada exitosamente.');
   }
 
   async function handleCreateProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     const name = String(form.get('productName') ?? '');
     const image = form.get('image');
@@ -758,8 +925,8 @@ export function App() {
     body.append('price', String(form.get('price') ?? 0));
     if (image instanceof File && image.size > 0) body.append('image', image);
     await authenticatedRequest('/api/admin/products', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body });
-    event.currentTarget.reset();
-    setMessage('Producto creado');
+    formElement.reset();
+    notifySuccess('Producto creado exitosamente.');
     await loadCatalog();
     await loadAdminData();
     await loadAccount();
@@ -782,13 +949,14 @@ export function App() {
      body.append('price', String(form.get('editPrice') ?? 0));
     if (image instanceof File && image.size > 0) body.append('image', image);
     await authenticatedRequest(`/api/admin/products/${form.get('editProductId')}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body });
-    setMessage('Producto actualizado');
+    notifySuccess('Producto actualizado exitosamente.');
     await loadCatalog();
     await loadAdminData();
   }
 
   async function createAccountAdjustment(customerId: string, event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     await authenticatedRequest(`/api/admin/customer-accounts/${customerId}/adjustments`, {
       method: 'POST',
@@ -797,10 +965,11 @@ export function App() {
         direction: form.get('direction'),
         amount: Number(form.get('amount') ?? 0),
         description: form.get('description'),
+        idempotencyKey: form.get('idempotencyKey'),
       }),
     });
-    event.currentTarget.reset();
-    setMessage('Ajuste de cuenta corriente registrado');
+    formElement.reset();
+    notifySuccess('Ajuste de cuenta corriente registrado exitosamente.');
     await loadAdminData();
     await loadAccount();
   }
@@ -813,6 +982,7 @@ export function App() {
     });
     await loadAdminData();
     await loadAccount();
+    notifySuccess('Cambio de estado exitoso.');
   }
 
   async function updateAdminOrderDetails(id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) {
@@ -824,6 +994,7 @@ export function App() {
     await loadCatalog();
     await loadAdminData();
     await loadAccount();
+    notifySuccess('Detalle del pedido actualizado exitosamente.');
   }
 
   async function updateAdminUser(id: string, isActive: boolean, password?: string) {
@@ -833,10 +1004,12 @@ export function App() {
       body: JSON.stringify({ isActive, password: password || undefined }),
     });
     await loadAdminData();
+    notifySuccess('Usuario actualizado exitosamente.');
   }
 
   async function upsertDeliveryMethod(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     const id = String(form.get('deliveryMethodId') ?? '');
     await authenticatedRequest(`/api/admin/delivery-methods${id ? `/${id}` : ''}`, {
@@ -850,13 +1023,15 @@ export function App() {
         isActive: form.get('deliveryIsActive') === 'on',
       }),
     });
-    event.currentTarget.reset();
+    formElement.reset();
     await loadCatalog();
     await loadAdminData();
+    notifySuccess(id ? 'Método de entrega actualizado exitosamente.' : 'Método de entrega creado exitosamente.');
   }
 
   async function registerOrderPayment(id: string, event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     await authenticatedRequest(`/api/admin/orders/${id}/payments`, {
       method: 'POST',
@@ -865,11 +1040,13 @@ export function App() {
         amount: Number(form.get('amount') ?? 0),
         method: form.get('method') || undefined,
         notes: form.get('notes') || undefined,
+        idempotencyKey: form.get('idempotencyKey'),
       }),
     });
-    event.currentTarget.reset();
+    formElement.reset();
     await loadAdminData();
     await loadAccount();
+    notifySuccess('Pago registrado exitosamente.');
   }
 
   async function sendPaymentReceipt(id: string) {
@@ -881,7 +1058,8 @@ export function App() {
       const fallbackMessage = data.notification.reason === 'SMTP_SEND_FAILED'
         ? 'No se pudo enviar el comprobante por un error del servicio SMTP.'
         : 'Comprobante preparado, pero SMTP no esta configurado para enviarlo.';
-      setMessage(data.notification.sent ? 'Comprobante enviado por email al cliente.' : fallbackMessage);
+      if (data.notification.sent) notifySuccess('Comprobante enviado por email al cliente.');
+       else notifyError(fallbackMessage);
     } catch (error) {
       if (error instanceof ApiError && error.code === 'NO_PAYMENTS_FOR_RECEIPT') {
         throw new Error('El pedido todavia no tiene pagos registrados para emitir un comprobante.');
@@ -896,13 +1074,25 @@ export function App() {
       headers: { Authorization: `Bearer ${token}` },
       body: JSON.stringify({ reason }),
     });
-    setMessage('Pago reversado y movimiento de cuenta registrado.');
+    notifySuccess('Pago reversado y movimiento de cuenta registrado exitosamente.');
+    await loadAdminData();
+    await loadAccount();
+  }
+
+  async function applyCustomerCredit(customerId: string, destinationOrderId: string, amount: number, idempotencyKey: string) {
+    await authenticatedRequest(`/api/admin/customer-accounts/${customerId}/credit-applications`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ destinationOrderId, amount, idempotencyKey }),
+    });
+    notifySuccess('Crédito aplicado al pedido exitosamente.');
     await loadAdminData();
     await loadAccount();
   }
 
   async function upsertPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     const id = String(form.get('promotionId') ?? '');
     const scope = String(form.get('scope')) as Promotion['scope'];
@@ -927,9 +1117,10 @@ export function App() {
       }),
     });
 
-    event.currentTarget.reset();
+    formElement.reset();
     await loadCatalog();
     await loadAdminData();
+    notifySuccess(id ? 'Promoción actualizada exitosamente.' : 'Promoción creada exitosamente.');
   }
 
   async function upsertCatalog(event: FormEvent<HTMLFormElement>) {
@@ -941,7 +1132,7 @@ export function App() {
       headers: { Authorization: `Bearer ${token}` },
       body: JSON.stringify({ name: form.get('catalogName'), startsAt: dateTimeInputToUtcIso(String(form.get('catalogStartsAt') ?? '')), endsAt: dateTimeInputToUtcIso(String(form.get('catalogEndsAt') ?? '')), isActive: form.get('catalogIsActive') === 'on' }),
     });
-    setMessage(id ? 'Catalogo actualizado' : 'Catalogo creado');
+    notifySuccess(id ? 'Catálogo actualizado exitosamente.' : 'Catálogo creado exitosamente.');
     await loadAdminData();
   }
 
@@ -951,38 +1142,37 @@ export function App() {
       headers: { Authorization: `Bearer ${token}` },
       body: JSON.stringify({ prices }),
     });
-     setMessage(prices.some((price) => price.amount === null) ? 'Precios del catalogo actualizados; se quitaron los overrides vacios.' : 'Precios del catalogo actualizados');
+     notifySuccess(prices.some((price) => price.amount === null) ? 'Precios del catálogo actualizados; se quitaron los overrides vacíos.' : 'Precios del catálogo actualizados exitosamente.');
     await loadAdminData();
   }
 
   function renderPage() {
-    if (path === '/productos') return <ProductsPage isLoading={isLoading} catalogError={catalogError} products={products} onAdd={addToCart} />;
+    if (path === '/productos') return <ProductsPage isLoading={isLoading} catalogError={catalogError} products={products} navigate={navigate} pagination={catalogPagination} onPageChange={(page) => void loadCatalog(page)} onAdd={addToCart} />;
+    if (path.match(/^\/productos\/[^/]+$/)) return <ProductDetailPage product={productDetail} loading={productDetailLoading} error={catalogError} onAdd={addToCart} navigate={navigate} />;
     if (path === '/login') return <LoginPage error={error} onLogin={handleLogin} onResendVerification={handleResendVerification} navigate={navigate} />;
+    if (path === '/recuperar-contrasena') return <PasswordResetRequestPage onSubmit={async (email) => { await apiRequest('/api/auth/request-password-reset', { method: 'POST', body: JSON.stringify({ email }) }); notifySuccess('Si el email corresponde a una cuenta activa, recibirás instrucciones.'); }} error={error} />;
+    if (path === '/restablecer-contrasena') return <PasswordResetPage onSubmit={async (tokenValue, password) => { await apiRequest('/api/auth/reset-password', { method: 'POST', body: JSON.stringify({ token: tokenValue, password }) }); notifySuccess('Contraseña actualizada exitosamente.'); navigate('/login'); }} error={error} navigate={navigate} />;
     if (path === '/registro') return <RegisterPage error={error} onRegister={handleRegister} navigate={navigate} />;
     if (path === '/verificar-email') return <VerifyEmailPage error={error} onVerify={handleVerifyEmail} navigate={navigate} />;
-    if (path === '/carrito') return <CartPage cartProducts={cartProducts} deliveryMethods={deliveryMethods} total={cartTotal} user={user} navigate={navigate} onQuantity={updateCartQuantity} onCreateOrder={handleCreateOrder} error={error} />;
+    if (path === '/carrito') return <CartPage cartProducts={cartProducts} unresolvedItems={cart.length - cartProducts.length} deliveryMethods={deliveryMethods} total={cartTotal} user={user} navigate={navigate} onQuantity={updateCartQuantity} onCreateOrder={handleCreateOrder} error={error} />;
     if (path === '/mis-pedidos') return <OrdersPage orders={orders} user={user} navigate={navigate} onCancelOrder={cancelOrder} error={error} />;
     if (path === '/cuenta-corriente') return <CustomerAccountPage user={user} account={account} movements={accountMovements} navigate={navigate} />;
     if (path === '/cuenta') return <AccountPage user={user} onLogout={logout} navigate={navigate} />;
-    if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} catalogs={catalogs} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} accounts={adminAccounts} promotions={promotions} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onReversePayment={reverseOrderPayment} onSendPaymentReceipt={sendPaymentReceipt} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} onUpsertCatalog={upsertCatalog} onUpdateCatalogPrices={updateCatalogPrices} />;
-    return <HomePage products={featuredProducts} onAdd={addToCart} navigate={navigate} />;
+     if (path.startsWith('/admin')) return <AdminPage user={user} navigate={navigate} path={path} products={adminProducts} categories={categories} catalogs={catalogs} deliveryMethods={deliveryMethods} orders={orders} users={adminUsers} admins={admins} accounts={adminAccounts} promotions={promotions} report={report} selectedProduct={selectedProduct} selectedProductId={selectedProductId} setSelectedProductId={setSelectedProductId} onCreateCategory={handleCreateCategory} onCreateProduct={handleCreateProduct} onUpdateProduct={handleUpdateProduct} onUpdateOrder={updateAdminOrder} onUpdateOrderDetails={updateAdminOrderDetails} onUpdateUser={updateAdminUser} onUpsertDeliveryMethod={upsertDeliveryMethod} onRegisterPayment={registerOrderPayment} onReversePayment={reverseOrderPayment} onApplyCustomerCredit={applyCustomerCredit} onSendPaymentReceipt={sendPaymentReceipt} onCreateAccountAdjustment={createAccountAdjustment} onUpsertPromotion={upsertPromotion} onUpsertCatalog={upsertCatalog} onUpdateCatalogPrices={updateCatalogPrices} onLoadReport={async (query) => { const data = await authenticatedRequest<AdminReport>(`/api/admin/reports?${new URLSearchParams(query)}`, { headers: { Authorization: `Bearer ${token}` } }); setReport(data); notifySuccess('Reporte actualizado exitosamente.'); }} onCreateAdmin={async (payload) => { const data = await authenticatedRequest<{ admin: AdminUser }>('/api/admin/admins', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) }); setAdmins((current) => [data.admin, ...current]); notifySuccess('Administrador creado exitosamente.'); }} onUpdateAdmin={async (id, payload) => { const data = await authenticatedRequest<{ admin: AdminUser }>(`/api/admin/admins/${id}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify(payload) }); setAdmins((current) => current.map((admin) => admin.id === id ? data.admin : admin)); notifySuccess('Administrador actualizado exitosamente.'); }} />;
+    return <HomePage products={featuredProducts} navigate={navigate} onAdd={addToCart} />;
   }
 
   return (
     <main>
       <Nav cartCount={cartCount} user={user} navigate={navigate} path={path} />
-      {error ? <AppAlert message={error} variant="error" onDismiss={() => setError(null)} /> : message ? <AppAlert message={message} variant="success" onDismiss={() => setMessage(null)} /> : null}
+      <Toaster position="top-right" closeButton richColors toastOptions={{ className: 'naturaToast' }} />
       {renderPage()}
       <Footer />
     </main>
   );
 }
 
-function AppAlert({ message, variant, onDismiss }: { message: string; variant: 'error' | 'success'; onDismiss: () => void }) {
-  return <div className="appAlertBackdrop"><div className={`appAlert ${variant === 'error' ? 'appAlertError' : 'appAlertSuccess'}`} role={variant === 'error' ? 'alert' : 'status'} aria-live={variant === 'error' ? 'assertive' : 'polite'}><span>{message}</span><button className="appAlertClose" type="button" onClick={onDismiss} aria-label="Cerrar alerta">×</button></div></div>;
-}
-
-function HomePage({ products, onAdd, navigate }: { products: CatalogProduct[]; onAdd: (product: CatalogProduct) => void; navigate: (path: string) => void }) {
+function HomePage({ products, navigate, onAdd }: { products: CatalogProduct[]; navigate: (path: string) => void; onAdd: (product: CatalogProduct, variantId?: string, quantity?: number) => void }) {
   return (
     <>
       <header className="hero">
@@ -1031,13 +1221,13 @@ function HomePage({ products, onAdd, navigate }: { products: CatalogProduct[]; o
           <div><p className="eyebrow">Productos destacados</p><h2>Favoritos para sumar al pedido.</h2></div>
           <button className="textLink" type="button" onClick={() => navigate('/productos')}>Ver todos</button>
         </div>
-        <div className="productGrid">{products.map((product) => <ProductCard key={product.id} product={product} onAdd={onAdd} />)}</div>
+        <div className="productGrid">{products.map((product) => <ProductCard key={product.id} product={product} navigate={navigate} onAdd={onAdd} />)}</div>
       </section>
     </>
   );
 }
 
-function ProductsPage({ isLoading, catalogError, products, onAdd }: { isLoading: boolean; catalogError: string | null; products: CatalogProduct[]; onAdd: (product: CatalogProduct) => void }) {
+function ProductsPage({ isLoading, catalogError, products, navigate, pagination, onPageChange, onAdd }: { isLoading: boolean; catalogError: string | null; products: CatalogProduct[]; navigate: (path: string) => void; pagination: CatalogPagination | null; onPageChange: (page: number) => void; onAdd: (product: CatalogProduct, variantId?: string, quantity?: number) => void }) {
   const [search, setSearch] = useState('');
   const normalized = search.trim().toLowerCase();
   const filtered = normalized
@@ -1051,13 +1241,38 @@ function ProductsPage({ isLoading, catalogError, products, onAdd }: { isLoading:
       {isLoading ? <p className="statusText">Cargando productos...</p> : null}
       {catalogError ? <p className="statusText errorText">{catalogError}</p> : null}
       {!isLoading && !catalogError && filtered.length === 0 ? <p className="statusText">No encontramos productos para esa busqueda.</p> : null}
-      <div className="productGrid">{filtered.map((product) => <ProductCard key={product.id} product={product} onAdd={onAdd} />)}</div>
+        <div className="productGrid">{filtered.map((product) => <ProductCard key={product.id} product={product} navigate={navigate} onAdd={onAdd} />)}</div>
+       {pagination && pagination.totalPages > 1 ? <nav className="pagination" aria-label="Paginación de productos"><button type="button" disabled={pagination.page <= 1} onClick={() => onPageChange(pagination.page - 1)}>Anterior</button><span>Página {pagination.page} de {pagination.totalPages}</span><button type="button" disabled={pagination.page >= pagination.totalPages} onClick={() => onPageChange(pagination.page + 1)}>Siguiente</button></nav> : null}
     </section>
   );
 }
 
 function LoginPage({ error, onLogin, onResendVerification, navigate }: { error: string | null; onLogin: (event: FormEvent<HTMLFormElement>) => void; onResendVerification: (event: FormEvent<HTMLFormElement>) => void; navigate: (path: string) => void }) {
-  return <AuthShell title="Iniciar sesion" error={error}><form className="adminForm compactForm" onSubmit={onLogin}><label>Email<input name="email" type="email" required /></label><label>Contrasena<input name="password" type="password" required /></label><button type="submit">Ingresar</button><button className="secondaryButton" type="button" onClick={() => navigate('/registro')}>Crear cuenta cliente</button></form><form className="adminForm compactForm" onSubmit={onResendVerification}><p className="statusText">Si todavia no validaste tu email, pedi un nuevo enlace.</p><label>Email<input name="email" type="email" required /></label><button className="secondaryButton" type="submit">Reenviar validacion</button></form></AuthShell>;
+  return <AuthShell title="Iniciar sesion" error={error}><form className="adminForm compactForm" onSubmit={onLogin}><label>Email<input name="email" type="email" autoComplete="email" required /></label><label>Contrasena<input name="password" type="password" autoComplete="current-password" required /></label><button type="submit">Ingresar</button><button className="secondaryButton" type="button" onClick={() => navigate('/recuperar-contrasena')}>¿Olvidaste tu contraseña?</button><button className="secondaryButton" type="button" onClick={() => navigate('/registro')}>Crear cuenta cliente</button></form><form className="adminForm compactForm" onSubmit={onResendVerification}><p className="statusText">Si todavia no validaste tu email, pedi un nuevo enlace.</p><label>Email<input name="email" type="email" required /></label><button className="secondaryButton" type="submit">Reenviar validacion</button></form></AuthShell>;
+}
+
+function PasswordResetRequestPage({ onSubmit, error }: { onSubmit: (email: string) => Promise<void>; error: string | null }) {
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); await onSubmit(String(new FormData(event.currentTarget).get('email') ?? '')); }
+  return <AuthShell title="Recuperar contraseña" error={error}><form className="adminForm compactForm" onSubmit={submit}><p>Te enviaremos instrucciones si existe una cuenta activa con ese email.</p><label>Email<input name="email" type="email" autoComplete="email" required /></label><button type="submit">Enviar instrucciones</button></form></AuthShell>;
+}
+
+function PasswordResetPage({ onSubmit, error, navigate }: { onSubmit: (token: string, password: string) => Promise<void>; error: string | null; navigate: (path: string) => void }) {
+  const token = new URLSearchParams(window.location.search).get('token') ?? '';
+  const [password, setPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [localError, setLocalError] = useState<string | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!token) return setLocalError('El enlace no tiene un token válido.'); if (password.length < 8 || password !== confirmation) return setLocalError('La contraseña debe tener al menos 8 caracteres y coincidir.'); setLocalError(null); await onSubmit(token, password); }
+  return <AuthShell title="Restablecer contraseña" error={error ?? localError}><form className="adminForm compactForm" onSubmit={submit}><label>Nueva contraseña<input type="password" minLength={8} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label><label>Repetir contraseña<input type="password" minLength={8} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required /></label><button type="submit">Actualizar contraseña</button><button className="secondaryButton" type="button" onClick={() => navigate('/login')}>Volver al login</button></form></AuthShell>;
+}
+
+function ProductDetailPage({ product, loading, error, onAdd, navigate }: { product: CatalogProduct | null; loading: boolean; error: string | null; onAdd: (product: CatalogProduct, variantId?: string, quantity?: number) => void; navigate: (path: string) => void }) {
+  const [variantId, setVariantId] = useState('');
+  const [quantity, setQuantity] = useState(1);
+  useEffect(() => { setVariantId(product?.variants[0]?.id ?? ''); setQuantity(1); }, [product]);
+  if (loading) return <section className="section pageSection"><p className="statusText">Cargando producto...</p></section>;
+  if (error || !product) return <section className="section pageSection"><p className="statusText errorText">{error ?? 'Producto no encontrado.'}</p><button className="secondaryButton" type="button" onClick={() => navigate('/productos')}>Volver al catálogo</button></section>;
+  const variant = product.variants.find((candidate) => candidate.id === variantId) ?? null;
+  return <section className="section pageSection productDetail"><button className="textLink" type="button" onClick={() => navigate('/productos')}>← Volver al catálogo</button><div className="detailGrid"><div className="detailGallery">{product.images.length ? product.images.map((image) => <img key={image.url} src={imageSource(image.url)} alt={image.altText ?? product.name} />) : <span>Sin imágenes</span>}</div><div><p className="eyebrow">{product.category?.name ?? product.line ?? 'Producto'}</p><h1>{product.name}</h1><p className="lead">{product.description || 'Producto disponible en nuestro catálogo.'}</p><form className="adminForm" onSubmit={(event) => { event.preventDefault(); if (variant) onAdd(product, variant.id, quantity); }}><label>Variante<select aria-label="Seleccionar variante" value={variantId} onChange={(event) => setVariantId(event.target.value)} required><option value="" disabled>Seleccioná una variante</option>{product.variants.map((item) => <option key={item.id} value={item.id} disabled={!item.currentPrice || item.availableStock < 1}>{item.name} · {item.currentPrice ? formatPrice(item.currentPrice.amount) : 'Sin precio'} · stock {item.availableStock}</option>)}</select></label><label>Cantidad<input type="number" min="1" max={variant?.availableStock ?? 1} value={quantity} onChange={(event) => setQuantity(Math.max(1, Number(event.target.value)))} required /></label><button type="submit" disabled={!variant || !variant.currentPrice || variant.availableStock < 1}>Agregar al carrito</button></form></div></div></section>;
 }
 
 function RegisterPage({ error, onRegister, navigate }: { error: string | null; onRegister: (event: FormEvent<HTMLFormElement>) => void; navigate: (path: string) => void }) {
@@ -1094,7 +1309,7 @@ function AuthShell({ title, error, children }: { title: string; error: string | 
   return <section className="section authSection"><p className="eyebrow">Cuenta</p><h1>{title}</h1>{error ? <p className="statusText errorText">{error}</p> : null}{children}</section>;
 }
 
-function CartPage({ cartProducts, deliveryMethods, total, user, navigate, onQuantity, onCreateOrder, error }: { cartProducts: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number]; quantity: number }>; deliveryMethods: DeliveryMethod[]; total: number; user: AuthUser | null; navigate: (path: string) => void; onQuantity: (variantId: string, quantity: number) => void; onCreateOrder: (event: FormEvent<HTMLFormElement>) => void; error: string | null }) {
+function CartPage({ cartProducts, unresolvedItems, deliveryMethods, total, user, navigate, onQuantity, onCreateOrder, error }: { cartProducts: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number]; quantity: number }>; unresolvedItems: number; deliveryMethods: DeliveryMethod[]; total: number; user: AuthUser | null; navigate: (path: string) => void; onQuantity: (variantId: string, quantity: number) => void; onCreateOrder: (event: FormEvent<HTMLFormElement>) => void; error: string | null }) {
   const [deliveryMethodId, setDeliveryMethodId] = useState('');
   const selectedDeliveryMethod = deliveryMethods.find((method) => method.id === deliveryMethodId) ?? null;
   const orderTotal = total + (selectedDeliveryMethod?.cost ?? 0);
@@ -1109,7 +1324,7 @@ function CartPage({ cartProducts, deliveryMethods, total, user, navigate, onQuan
         {cartProducts.length > 0 ? <p className="cartHeaderSummary">{cartProducts.length} producto{cartProducts.length === 1 ? '' : 's'} · {formatPrice(total)}</p> : null}
       </div>
       {error ? <p className="statusText errorText">{error}</p> : null}
-      {cartProducts.length === 0 ? <p className="statusText">El carrito esta vacio.</p> : (
+      {cartProducts.length === 0 && unresolvedItems === 0 ? <p className="statusText">El carrito esta vacio.</p> : (
         <div className="cartLayout">
           <div className="cartList">
             {cartProducts.map(({ product, variant, quantity }) => (
@@ -1126,6 +1341,7 @@ function CartPage({ cartProducts, deliveryMethods, total, user, navigate, onQuan
                 <button className="cartRemoveButton" type="button" onClick={() => onQuantity(variant.id, 0)}>Quitar</button>
               </article>
             ))}
+            {unresolvedItems > 0 ? <p className="statusText errorText">Hay {unresolvedItems} producto{unresolvedItems === 1 ? '' : 's'} que no se pudo cargar. Volvé al catálogo para actualizarlo antes de confirmar.</p> : null}
           </div>
           <form className="adminForm checkoutForm" onSubmit={onCreateOrder}>
             <div className="checkoutTotal"><span>Total</span><strong>{formatPrice(orderTotal)}</strong></div>
@@ -1135,7 +1351,7 @@ function CartPage({ cartProducts, deliveryMethods, total, user, navigate, onQuan
             <label>Notas<textarea name="deliveryNotes" rows={2} /></label>
             {!user ? <p className="statusText compactStatus">Para confirmar tenes que iniciar sesion o registrarte.</p> : null}
             <div className="checkoutActions">
-              <button type="submit">{user ? 'Confirmar pedido' : 'Iniciar sesion para confirmar'}</button>
+              <button type="submit" disabled={unresolvedItems > 0}>{user ? 'Confirmar pedido' : 'Iniciar sesion para confirmar'}</button>
               <button className="secondaryButton" type="button" onClick={() => navigate('/productos')}>Seguir comprando</button>
             </div>
           </form>
@@ -1163,7 +1379,11 @@ function CustomerAccountPage({ user, account, movements, navigate }: { user: Aut
     <section className="section pageSection accountPage">
       <div className="sectionHeader">
         <div><p className="eyebrow">Cuenta corriente</p><h1>Saldo y movimientos.</h1><p className="statusText">Aca vas a ver cargos de pedidos, pagos registrados y ajustes de tu cuenta.</p></div>
-        <div className={`balanceCard ${(account?.currentBalance ?? 0) > 0 ? 'debt' : 'ok'}`}><span>Saldo actual</span><strong>{balanceText(account?.currentBalance ?? 0)}</strong></div>
+        <div className={`balanceCard ${(account?.debt ?? 0) > 0 ? 'debt' : 'ok'}`}>
+          <div className="balanceCardHeader"><span>Resumen de cuenta</span><span className="balanceStatus">{(account?.debt ?? 0) > 0 ? 'Pendiente' : 'Al día'}</span></div>
+          <div className="balanceMain"><small>Deuda pendiente</small><strong>{formatPrice(account?.debt ?? 0)}</strong></div>
+          <div className="balanceCredit"><span>Crédito disponible</span><strong>{formatPrice(account?.availableCredit ?? 0)}</strong></div>
+        </div>
       </div>
       <AccountMovementList movements={movements} emptyText="Todavia no hay movimientos en tu cuenta corriente." />
     </section>
@@ -1177,10 +1397,10 @@ function AccountMovementList({ movements, emptyText }: { movements: AccountMovem
     <div className="accountMovementList">
       {movements.map((movement) => (
         <article className="accountMovementRow" key={movement.id}>
-          <div><strong>{accountMovementLabel(movement.type)}</strong><small>{movement.description || 'Movimiento de cuenta'}{movement.orderId ? ` · Pedido ${movement.orderId.slice(0, 8)}` : ''}</small></div>
-          <span className={movement.direction === 'DEBIT' ? 'debitAmount' : 'creditAmount'}>{movement.direction === 'DEBIT' ? '+' : '-'} {formatPrice(movement.amount)}</span>
-          <span>{balanceText(movement.balanceAfter)}</span>
-          <small>{new Date(movement.occurredAt).toLocaleString('es-AR')}</small>
+          <div className="accountMovementInfo"><strong>{accountMovementLabel(movement.type)}</strong><small>{movement.orderNumber ? `Pedido ${formatOrderNumber(movement.orderNumber)}` : movement.description || 'Movimiento de cuenta'}</small>{movement.type === 'PAYMENT_CREDIT' ? <small>Medio: {paymentMethodLabel(movement.paymentMethod)}</small> : null}</div>
+          <div className="accountMovementAmount"><span className={movement.direction === 'DEBIT' ? 'debitAmount' : 'creditAmount'}>{movement.direction === 'DEBIT' ? '+' : '-'} {formatPrice(movement.amount)}</span><small>Movimiento</small></div>
+          <div className="accountMovementBalance"><span>{balanceText(movement.balanceAfter)}</span><small>Saldo</small></div>
+          <time dateTime={movement.occurredAt}>{new Date(movement.occurredAt).toLocaleString('es-AR')}</time>
         </article>
       ))}
     </div>
@@ -1195,17 +1415,18 @@ function AccountsAdmin({ accounts, onCreateAccountAdjustment }: { accounts: Admi
     ? accounts.filter((account) => [account.customer.firstName, account.customer.lastName, account.customer.email, account.customer.phone, balanceText(account.currentBalance)].filter(Boolean).some((value) => String(value).toLowerCase().includes(normalized)))
     : accounts;
   const selectedAccount = accounts.find((candidate) => candidate.customerId === selectedCustomerId) ?? null;
-  const totalDebt = accounts.reduce((total, account) => total + Math.max(account.currentBalance, 0), 0);
-  const customersWithDebt = accounts.filter((account) => account.currentBalance > 0).length;
+  const totalDebt = accounts.reduce((total, account) => total + account.debt, 0);
+  const totalCredit = accounts.reduce((total, account) => total + account.availableCredit, 0);
+  const customersWithDebt = accounts.filter((account) => account.debt > 0).length;
 
   return (
     <section className="adminPage">
-      <div className="adminPageHeader"><div><p className="eyebrow">Cuentas corrientes</p><h2>Saldos de clientes.</h2><p>Consulta deuda, saldo a favor y registra ajustes manuales auditables.</p></div><div className="adminStats"><span>{accounts.length} cuentas</span><span>{customersWithDebt} con deuda</span><span>{formatPrice(totalDebt)} a cobrar</span></div></div>
+      <div className="adminPageHeader"><div><p className="eyebrow">Cuentas corrientes</p><h2>Saldos de clientes.</h2><p>Consulta deuda, saldo a favor y registra ajustes manuales auditables.</p></div><div className="adminStats"><span>{accounts.length} cuentas</span><span>{customersWithDebt} con deuda</span><span>{formatPrice(totalDebt)} a cobrar</span><span>{formatPrice(totalCredit)} en créditos</span></div></div>
       <section className="adminCard productListCard">
         <div className="cardHeader productToolbar"><div><h3>Clientes</h3><span>{filteredAccounts.length} de {accounts.length} registros</span></div></div>
         <input className="searchInput adminSearch" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por cliente, email, telefono o saldo" />
         {filteredAccounts.length === 0 ? <p className="statusText">No encontramos cuentas con ese filtro.</p> : null}
-        {filteredAccounts.length > 0 ? <div className="adminTable">{filteredAccounts.map((account) => <button className="adminTableRow accountTableRow" key={account.id} type="button" onClick={() => setSelectedCustomerId(account.customerId)}><span><strong>{account.customer.firstName} {account.customer.lastName}</strong><small>{account.customer.email}</small></span><span className={`pill ${account.currentBalance > 0 ? 'warning' : 'ok'}`}>{balanceText(account.currentBalance)}</span><span>{account.movementCount} movimientos</span><span>{account.lastMovementAt ? new Date(account.lastMovementAt).toLocaleDateString('es-AR') : 'Sin movimientos'}</span></button>)}</div> : null}
+         {filteredAccounts.length > 0 ? <div className="adminTable">{filteredAccounts.map((account) => <button className="adminTableRow accountTableRow" key={account.id} type="button" onClick={() => setSelectedCustomerId(account.customerId)}><span><strong>{account.customer.firstName} {account.customer.lastName}</strong><small>{account.customer.email}</small></span><span className={`pill ${account.debt > 0 ? 'warning' : 'ok'}`}>{account.debt > 0 ? `Debe ${formatPrice(account.debt)}` : 'Sin deuda'}</span><span>Crédito {formatPrice(account.availableCredit)}</span><span>{account.movementCount} movimientos</span></button>)}</div> : null}
       </section>
       {selectedAccount ? <AccountAdjustmentModal account={selectedAccount} onClose={() => setSelectedCustomerId('')} onCreateAccountAdjustment={onCreateAccountAdjustment} /> : null}
     </section>
@@ -1214,6 +1435,7 @@ function AccountsAdmin({ accounts, onCreateAccountAdjustment }: { accounts: Admi
 
 function AccountAdjustmentModal({ account, onClose, onCreateAccountAdjustment }: { account: AdminCustomerAccount; onClose: () => void; onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void> }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const idempotencyKey = useRef(crypto.randomUUID());
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -1228,11 +1450,12 @@ function AccountAdjustmentModal({ account, onClose, onCreateAccountAdjustment }:
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
       <form aria-labelledby="accountModalTitle" aria-modal="true" className="adminForm productModal" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onSubmit={submitAdjustment} onMouseDown={(event) => event.stopPropagation()} role="dialog">
         <div className="modalHeader"><div><p className="eyebrow">Cuenta corriente</p><h3 id="accountModalTitle">{account.customer.firstName} {account.customer.lastName}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
-        <div className="adminStats"><span>{account.customer.email}</span><span>{balanceText(account.currentBalance)}</span></div>
-        <div className="modalFields">
+         <div className="adminStats"><span>{account.customer.email}</span><span>Deuda {formatPrice(account.debt)}</span><span>Crédito {formatPrice(account.availableCredit)}</span></div>
+         <div className="modalFields">
           <label>Tipo de ajuste<select name="direction" defaultValue="CREDIT" required><option value="CREDIT">Crédito: baja deuda o genera saldo a favor</option><option value="DEBIT">Débito: aumenta deuda</option></select></label>
           <label>Monto<input name="amount" type="number" min="0.01" step="0.01" required /></label>
-          <label>Motivo<textarea name="description" minLength={3} maxLength={600} rows={3} placeholder="Ej: cancelacion de deuda acordada, ajuste por diferencia, saldo inicial" required /></label>
+           <label>Motivo<textarea name="description" minLength={3} maxLength={600} rows={3} placeholder="Ej: cancelacion de deuda acordada, ajuste por diferencia, saldo inicial" required /></label>
+           <input name="idempotencyKey" type="hidden" value={idempotencyKey.current} readOnly />
         </div>
         <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="submit">Registrar ajuste</button></div>
       </form>
@@ -1269,8 +1492,10 @@ type AdminPageProps = {
   deliveryMethods: DeliveryMethod[];
   orders: Order[];
   users: AdminUser[];
+  admins: AdminUser[];
   accounts: AdminCustomerAccount[];
   promotions: Promotion[];
+  report: AdminReportsData;
   selectedProduct: CatalogProduct | null;
   selectedProductId: string;
   setSelectedProductId: (id: string) => void;
@@ -1283,12 +1508,39 @@ type AdminPageProps = {
   onUpsertDeliveryMethod: AdminFormSubmit;
   onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>;
+  onApplyCustomerCredit: (customerId: string, destinationOrderId: string, amount: number, idempotencyKey: string) => void | Promise<void>;
   onSendPaymentReceipt: (id: string) => void | Promise<void>;
   onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onUpsertPromotion: AdminFormSubmit;
   onUpsertCatalog: AdminFormSubmit;
   onUpdateCatalogPrices: (catalogId: string, prices: Array<{ variantId: string; amount: number | null }>) => void | Promise<void>;
+  onLoadReport: (query: Record<string, string>) => Promise<void>;
+  onCreateAdmin: (payload: Record<string, unknown>) => Promise<void>;
+  onUpdateAdmin: (id: string, payload: Record<string, unknown>) => Promise<void>;
 };
+
+function ReportsAdmin({ report, onLoadReport }: { report: AdminReportsData; onLoadReport: (query: Record<string, string>) => Promise<void> }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [from, setFrom] = useState(today.slice(0, 8) + '01');
+  const [to, setTo] = useState(today);
+  const [threshold, setThreshold] = useState('5');
+  const [loading, setLoading] = useState(false);
+  async function load(event?: FormEvent) { event?.preventDefault(); setLoading(true); try { await onLoadReport({ from, to, lowStockThreshold: threshold }); } finally { setLoading(false); } }
+  // The initial request intentionally runs once for the initial date range.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { void load(); }, []);
+  return <section className="adminPage"><div className="adminPageHeader"><div><p className="eyebrow">Reportes</p><h2>Resumen del negocio.</h2><p>Consultá ventas, pagos, pedidos y stock para un período.</p></div></div><form className="adminForm reportFilters" onSubmit={load}><div className="formRow"><label>Desde<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} required /></label><label>Hasta<input type="date" value={to} onChange={(event) => setTo(event.target.value)} required /></label></div><label>Umbral de stock bajo<input type="number" min="0" max="1000" value={threshold} onChange={(event) => setThreshold(event.target.value)} required /></label><button type="submit" disabled={loading}>{loading ? 'Cargando…' : 'Actualizar reporte'}</button></form>{!report && loading ? <p className="statusText">Cargando reporte...</p> : null}{report ? <div className="reportGrid"><ReportSection title="Ventas"><p>{report.sales.orderCount} pedidos entregados · <strong>{formatPrice(report.sales.total)}</strong></p></ReportSection><ReportSection title="Ingresos"><p><strong>{formatPrice(report.income.total)}</strong></p></ReportSection><ReportSection title="Pedidos pendientes"><p><strong>{report.pendingOrders}</strong> pendientes</p></ReportSection><ReportSection title="Pedidos por estado"><ReportRows rows={report.ordersByStatus.map((item) => `${item.status}: ${item.count}`)} /></ReportSection><ReportSection title="Productos más vendidos"><ReportRows rows={report.topProducts.map((item) => `${item.product?.name ?? item.name ?? 'Producto'} · ${item.quantity} u. · ${formatPrice(item.total)}`)} /></ReportSection><ReportSection title="Stock bajo"><ReportRows rows={report.lowStock.map((item) => `${item.productName} · ${item.name} · ${item.stockQuantity} u.`)} /></ReportSection><ReportSection title="Ventas por entrega"><ReportRows rows={report.salesByDeliveryMethod.map((item) => `${item.deliveryMethodId ?? 'Sin método'} · ${item.count} · ${formatPrice(item.total)}`)} /></ReportSection></div> : null}</section>;
+}
+
+function ReportSection({ title, children }: { title: string; children: React.ReactNode }) { return <section className="adminCard reportSection"><h3>{title}</h3>{children}</section>; }
+function ReportRows({ rows }: { rows: string[] }) { return rows.length ? <ul>{rows.map((row) => <li key={row}>{row}</li>)}</ul> : <p className="statusText">Sin datos para este período.</p>; }
+
+function AdminsAdmin({ admins, onCreateAdmin, onUpdateAdmin }: { admins: AdminUser[]; onCreateAdmin: (payload: Record<string, unknown>) => Promise<void>; onUpdateAdmin: (id: string, payload: Record<string, unknown>) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  return <section className="adminPage"><div className="adminPageHeader"><div><p className="eyebrow">Administradores</p><h2>Accesos del equipo.</h2><p>Solo un SUPER_ADMIN puede crear o modificar administradores.</p></div><button className="primary" type="button" onClick={() => setOpen(true)}>Nuevo administrador</button></div>{admins.length === 0 ? <p className="statusText">No hay administradores.</p> : <div className="userGrid">{admins.map((admin) => <form className="adminForm userCard" key={admin.id} onSubmit={async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await onUpdateAdmin(admin.id, { isActive: form.get('isActive') === 'on', role: form.get('role') }); }}><strong>{admin.firstName} {admin.lastName}</strong><span>{admin.email}</span><label>Rol<select name="role" defaultValue={admin.role}><option value="ADMIN">ADMIN</option><option value="SUPER_ADMIN">SUPER_ADMIN</option></select></label><label className="checkboxLabel"><input name="isActive" type="checkbox" defaultChecked={admin.isActive} />Activo</label><button type="submit">Guardar</button></form>)}</div>}{open ? <AdminCreateModal onClose={() => setOpen(false)} onCreateAdmin={onCreateAdmin} /> : null}</section>;
+}
+
+function AdminCreateModal({ onClose, onCreateAdmin }: { onClose: () => void; onCreateAdmin: (payload: Record<string, unknown>) => Promise<void> }) { return <div className="modalBackdrop"><form className="adminForm productModal compactForm" onSubmit={async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); await onCreateAdmin({ email: form.get('email'), password: form.get('password'), firstName: form.get('firstName'), lastName: form.get('lastName'), phone: form.get('phone'), role: form.get('role') }); onClose(); }}><div className="modalHeader"><h3>Nuevo administrador</h3><button className="iconButton" type="button" onClick={onClose}>Cerrar</button></div><label>Nombre<input name="firstName" required /></label><label>Apellido<input name="lastName" required /></label><label>Email<input name="email" type="email" required /></label><label>Teléfono<input name="phone" /></label><label>Contraseña<input name="password" type="password" minLength={8} required /></label><label>Rol<select name="role" defaultValue="ADMIN"><option value="ADMIN">ADMIN</option><option value="SUPER_ADMIN">SUPER_ADMIN</option></select></label><button type="submit">Crear administrador</button></form></div>; }
 
 function AdminPage(props: AdminPageProps) {
   const currentPath = props.path === '/admin' ? '/admin/productos' : props.path;
@@ -1310,19 +1562,23 @@ function AdminPage(props: AdminPageProps) {
             ['/admin/pedidos', 'Pedidos'],
             ['/admin/cuentas', 'Cuentas corrientes'],
             ['/admin/promociones', 'Promociones'],
+            ['/admin/reportes', 'Reportes'],
             ['/admin/usuarios', 'Usuarios'],
+            ...(props.user?.role === 'SUPER_ADMIN' ? [['/admin/administradores', 'Administradores']] : []),
             ['/admin/configuracion', 'Configuracion'],
           ].map(([href, label]) => <button className={currentPath === href ? 'active' : ''} key={href} type="button" onClick={() => { props.setSelectedProductId(''); props.navigate(href); }}>{label}</button>)}
         </nav>
       </aside>
       <div className="adminWorkspace">
-        {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} products={props.products} onRegisterPayment={props.onRegisterPayment} onReversePayment={props.onReversePayment} onSendPaymentReceipt={props.onSendPaymentReceipt} onUpdateOrder={props.onUpdateOrder} onUpdateOrderDetails={props.onUpdateOrderDetails} /> : null}
+         {currentPath === '/admin/pedidos' ? <OrderAdminModern orders={props.orders} products={props.products} accounts={props.accounts} onRegisterPayment={props.onRegisterPayment} onReversePayment={props.onReversePayment} onApplyCustomerCredit={props.onApplyCustomerCredit} onSendPaymentReceipt={props.onSendPaymentReceipt} onUpdateOrder={props.onUpdateOrder} onUpdateOrderDetails={props.onUpdateOrderDetails} /> : null}
         {currentPath === '/admin/cuentas' ? <AccountsAdmin accounts={props.accounts} onCreateAccountAdjustment={props.onCreateAccountAdjustment} /> : null}
-         {currentPath === '/admin/promociones' ? <PromotionsAdmin categories={props.categories} catalogs={props.catalogs} products={props.products} promotions={props.promotions} onUpsertPromotion={props.onUpsertPromotion} /> : null}
+          {currentPath === '/admin/promociones' ? <PromotionsAdmin categories={props.categories} catalogs={props.catalogs} products={props.products} promotions={props.promotions} onUpsertPromotion={props.onUpsertPromotion} /> : null}
+          {currentPath === '/admin/reportes' ? <ReportsAdmin report={props.report} onLoadReport={props.onLoadReport} /> : null}
+          {currentPath === '/admin/administradores' && props.user?.role === 'SUPER_ADMIN' ? <AdminsAdmin admins={props.admins} onCreateAdmin={props.onCreateAdmin} onUpdateAdmin={props.onUpdateAdmin} /> : null}
          {currentPath === '/admin/catalogos' ? <CatalogsAdmin catalogs={props.catalogs} products={props.products} onUpsertCatalog={props.onUpsertCatalog} onUpdateCatalogPrices={props.onUpdateCatalogPrices} /> : null}
         {currentPath === '/admin/usuarios' ? <UserAdminModern users={props.users} onUpdateUser={props.onUpdateUser} /> : null}
         {currentPath === '/admin/configuracion' ? <SettingsAdmin deliveryMethods={props.deliveryMethods} onUpsertDeliveryMethod={props.onUpsertDeliveryMethod} /> : null}
-         {!['/admin/pedidos', '/admin/cuentas', '/admin/promociones', '/admin/catalogos', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
+          {!['/admin/pedidos', '/admin/cuentas', '/admin/promociones', '/admin/reportes', '/admin/administradores', '/admin/catalogos', '/admin/usuarios', '/admin/configuracion'].includes(currentPath) ? <ProductAdminModern {...props} /> : null}
       </div>
     </section>
   );
@@ -1448,12 +1704,11 @@ function CatalogsAdmin({ catalogs, products, onUpsertCatalog, onUpdateCatalogPri
 
 function CatalogModal({ catalog, onClose, onOpenPrices, onUpsertCatalog }: { catalog?: Catalog; onClose: () => void; onOpenPrices?: () => void; onUpsertCatalog: AdminFormSubmit }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
   useEffect(() => { closeButtonRef.current?.focus(); }, []);
-  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setSubmitError(null); try { await onUpsertCatalog(event); onClose(); } catch (error) { setSubmitError(error instanceof Error ? error.message : 'No se pudo guardar el catalogo'); } }
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); try { await onUpsertCatalog(event); onClose(); } catch (error) { notifyError(localizedErrorMessage(error, 'No se pudo guardar el catálogo')); } }
   return <div className="modalBackdrop" role="presentation" onMouseDown={onClose}><form className="adminForm productModal catalogModal" aria-labelledby="catalogModalTitle" aria-modal="true" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} onSubmit={submit} role="dialog">
     <div className="modalHeader"><div><p className="eyebrow">{catalog ? 'Detalle de catalogo' : 'Nuevo catalogo'}</p><h3 id="catalogModalTitle">{catalog?.name ?? 'Crear catalogo o campana'}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
-    <input name="catalogId" type="hidden" value={catalog?.id ?? ''} /><div className="modalFields"><label>Nombre<input name="catalogName" defaultValue={catalog?.name ?? ''} required /></label><div className="formRow"><label>Desde<input name="catalogStartsAt" type="datetime-local" defaultValue={catalogDateInput(catalog?.startsAt ?? '')} required /></label><label>Hasta<input name="catalogEndsAt" type="datetime-local" defaultValue={catalogDateInput(catalog?.endsAt ?? '')} required /></label></div><label className="checkboxLabel"><input name="catalogIsActive" type="checkbox" defaultChecked={catalog?.isActive ?? true} />Catalogo activo</label>{catalog ? <p className="statusText compactStatus">Para desactivar una campana, desmarca “Catalogo activo”. La API no ofrece borrado necesario para esta pantalla.</p> : null}{submitError ? <p className="statusText errorText">{submitError}</p> : null}</div>
+     <input name="catalogId" type="hidden" value={catalog?.id ?? ''} /><div className="modalFields"><label>Nombre<input name="catalogName" defaultValue={catalog?.name ?? ''} required /></label><div className="formRow"><label>Desde<input name="catalogStartsAt" type="datetime-local" defaultValue={catalogDateInput(catalog?.startsAt ?? '')} required /></label><label>Hasta<input name="catalogEndsAt" type="datetime-local" defaultValue={catalogDateInput(catalog?.endsAt ?? '')} required /></label></div><label className="checkboxLabel"><input name="catalogIsActive" type="checkbox" defaultChecked={catalog?.isActive ?? true} />Catalogo activo</label>{catalog ? <p className="statusText compactStatus">Para desactivar una campana, desmarca “Catalogo activo”. La API no ofrece borrado necesario para esta pantalla.</p> : null}</div>
     <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button>{onOpenPrices ? <button className="secondaryButton" type="button" onClick={onOpenPrices}>Editar precios</button> : null}<button type="submit">Guardar catalogo</button></div>
   </form></div>;
 }
@@ -1462,10 +1717,8 @@ function CatalogPricesModal({ catalog, products, onClose, onUpdateCatalogPrices 
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const variants = products.flatMap((product) => product.variants.map((variant) => ({ product, variant })));
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(catalog.prices.map((price) => [price.variantId, String(price.amount)])));
-  const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => { closeButtonRef.current?.focus(); }, []);
   async function save() {
-    setSaveError(null);
     const prices = Object.entries(values).map(([variantId, amount]) => {
       if (amount.trim() === '') {
         return catalog.prices.some((price) => price.variantId === variantId) ? { variantId, amount: null } : null;
@@ -1473,14 +1726,14 @@ function CatalogPricesModal({ catalog, products, onClose, onUpdateCatalogPrices 
       const parsedAmount = Number(amount);
       return Number.isFinite(parsedAmount) && parsedAmount > 0 ? { variantId, amount: parsedAmount } : null;
     }).filter((price): price is { variantId: string; amount: number | null } => price !== null);
-    if (prices.length === 0) { setSaveError('Ingresa al menos un precio valido.'); return; }
-    try { await onUpdateCatalogPrices(catalog.id, prices); onClose(); } catch (error) { setSaveError(error instanceof Error ? error.message : 'No se pudieron guardar los precios'); }
+    if (prices.length === 0) { notifyError('Ingresa al menos un precio valido.'); return; }
+    try { await onUpdateCatalogPrices(catalog.id, prices); onClose(); } catch (error) { notifyError(localizedErrorMessage(error, 'No se pudieron guardar los precios')); }
   }
   return <div className="modalBackdrop" role="presentation" onMouseDown={onClose}><div className="adminForm productModal catalogPricesModal" aria-labelledby="catalogPricesTitle" aria-modal="true" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} role="dialog">
     <div className="modalHeader"><div><p className="eyebrow">Precios del catalogo</p><h3 id="catalogPricesTitle">{catalog.name}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
      <p className="statusText compactStatus">Deja vacio un precio existente para quitar su override y volver al precio base. Los campos vacios sin override no se envian.</p>
     <div className="catalogPriceList">{variants.length === 0 ? <p className="statusText">No hay variantes disponibles para configurar.</p> : variants.map(({ product, variant }) => <label className="catalogPriceRow" key={variant.id}><span><strong>{product.name}</strong><small>{variant.name} · {variant.sku}</small></span><input aria-label={`Precio ${product.name} ${variant.name}`} type="number" min="0.01" step="0.01" value={values[variant.id] ?? ''} onChange={(event) => setValues((current) => ({ ...current, [variant.id]: event.target.value }))} /></label>)}</div>
-    {saveError ? <p className="statusText errorText">{saveError}</p> : null}<div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="button" onClick={() => void save()}>Guardar precios</button></div>
+     <div className="modalActions"><button className="secondaryButton" type="button" onClick={onClose}>Cancelar</button><button type="button" onClick={() => void save()}>Guardar precios</button></div>
   </div></div>;
 }
 
@@ -1589,7 +1842,7 @@ function ProductModal({ product, categories, selectedProductId, onClose, onUpdat
   );
 }
 
-function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetails, onRegisterPayment, onReversePayment, onSendPaymentReceipt }: { orders: Order[]; products: CatalogProduct[]; onUpdateOrder: (id: string, status: string) => void | Promise<void>; onUpdateOrderDetails: (id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>; onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>; onSendPaymentReceipt: (id: string) => void | Promise<void> }) {
+function OrderAdminModern({ orders, products, accounts, onUpdateOrder, onUpdateOrderDetails, onRegisterPayment, onReversePayment, onApplyCustomerCredit, onSendPaymentReceipt }: { orders: Order[]; products: CatalogProduct[]; accounts: AdminCustomerAccount[]; onUpdateOrder: (id: string, status: string) => void | Promise<void>; onUpdateOrderDetails: (id: string, payload: { deliveryMethodId: string | null; deliveryAddress: string | null; deliveryNotes: string | null; items: Array<{ variantId: string; quantity: number }> }) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>; onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>; onApplyCustomerCredit: (customerId: string, destinationOrderId: string, amount: number, idempotencyKey: string) => void | Promise<void>; onSendPaymentReceipt: (id: string) => void | Promise<void> }) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [paymentFilter, setPaymentFilter] = useState('');
@@ -1599,6 +1852,7 @@ function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetail
   const filteredOrders = orders.filter((order) => {
     const matchesSearch = !normalized || [
       order.id,
+      order.orderNumber,
       order.customer.firstName,
       order.customer.lastName,
       order.customer.email,
@@ -1630,7 +1884,7 @@ function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetail
       <section className="adminCard productListCard">
         <div className="cardHeader productToolbar"><div><h3>Todos los pedidos</h3><span>{filteredOrders.length} de {orders.length} registros</span></div></div>
         <div className="orderFilters">
-          <input className="searchInput adminSearch" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por cliente, email, producto o codigo" />
+          <input className="searchInput adminSearch" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por numero, cliente, email o producto" />
           <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filtrar por estado del pedido"><option value="">Todos los estados</option><option value="PENDING">Pendiente</option><option value="CONFIRMED">Confirmado</option><option value="PREPARING">Preparando</option><option value="DELIVERED">Entregado</option><option value="CANCELLED">Cancelado</option></select>
           <select value={paymentFilter} onChange={(event) => setPaymentFilter(event.target.value)} aria-label="Filtrar por estado de pago"><option value="">Todos los pagos</option><option value="UNPAID">Sin pago</option><option value="PARTIALLY_PAID">Pago parcial</option><option value="PAID">Pagado</option><option value="REFUNDED">Reembolsado</option></select>
         </div>
@@ -1638,10 +1892,10 @@ function OrderAdminModern({ orders, products, onUpdateOrder, onUpdateOrderDetail
         {orders.length > 0 && filteredOrders.length === 0 ? <p className="statusText">No encontramos pedidos con esos filtros.</p> : null}
         {filteredOrders.length > 0 ? <div className="adminTable">{filteredOrders.map((order) => {
           const paidAmount = effectivePaymentAmount(order.payments);
-          return <button className="adminTableRow orderTableRow" key={order.id} type="button" onClick={() => setSelectedOrderId(order.id)}><span><strong>Pedido {order.id.slice(0, 8)}</strong><small>{order.customer.firstName} {order.customer.lastName} · {order.customer.email}</small></span><span>{order.items.length} items</span><span>{formatPrice(order.total)}</span><span className={`pill ${orderStatusTone(order.status)}`}>{orderStatusLabel(order.status)}</span><span className={`pill ${paymentStatusTone(order.paymentStatus)}`}>{paymentStatusLabel(order.paymentStatus)}</span><span>{formatPrice(paidAmount)} pagado</span></button>;
+      return <button className="adminTableRow orderTableRow" key={order.id} type="button" onClick={() => setSelectedOrderId(order.id)}><span><strong>Pedido {formatOrderNumber(order.orderNumber)}</strong><small>{order.customer.firstName} {order.customer.lastName} · {order.customer.email}</small></span><span>{order.items.length} items</span><span>{formatPrice(order.total)}</span><span className={`pill ${orderStatusTone(order.status)}`}>{orderStatusLabel(order.status)}</span><span className={`pill ${paymentStatusTone(order.paymentStatus)}`}>{paymentStatusLabel(order.paymentStatus)}</span><span>{formatPrice(paidAmount)} aplicado</span></button>;
         })}</div> : null}
       </section>
-      {selectedOrder ? <OrderModal order={selectedOrder} variantOptions={variantOptions} onClose={() => setSelectedOrderId('')} onRegisterPayment={onRegisterPayment} onReversePayment={onReversePayment} onSendPaymentReceipt={onSendPaymentReceipt} onUpdateOrder={onUpdateOrder} onUpdateOrderItems={updateOrderItems} /> : null}
+      {selectedOrder ? <OrderModal order={selectedOrder} account={accounts.find((account) => account.customerId === selectedOrder.customer.id) ?? null} variantOptions={variantOptions} onClose={() => setSelectedOrderId('')} onRegisterPayment={onRegisterPayment} onReversePayment={onReversePayment} onApplyCustomerCredit={onApplyCustomerCredit} onSendPaymentReceipt={onSendPaymentReceipt} onUpdateOrder={onUpdateOrder} onUpdateOrderItems={updateOrderItems} /> : null}
     </section>
   );
 }
@@ -1688,21 +1942,23 @@ function isOrderStatusOptionDisabled(currentStatus: string, nextStatus: string) 
 }
 
 function adminOrderErrorMessage(error: unknown) {
-  if (error instanceof ApiError && error.code === 'ORDER_STATUS_LOCKED') return 'Este pedido ya esta cerrado y no permite cambiar su estado operativo.';
-  if (error instanceof Error) return error.message;
-  return 'No se pudo actualizar el pedido.';
+  return localizedErrorMessage(error, 'No se pudo actualizar el pedido.');
 }
 
-function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrderItems, onRegisterPayment, onReversePayment, onSendPaymentReceipt }: { order: Order; variantOptions: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number] }>; onClose: () => void; onUpdateOrder: (id: string, status: string) => void | Promise<void>; onUpdateOrderItems: (order: Order, items: Array<{ variantId: string; quantity: number }>) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>; onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>; onSendPaymentReceipt: (id: string) => void | Promise<void> }) {
+function OrderModal({ order, account, variantOptions, onClose, onUpdateOrder, onUpdateOrderItems, onRegisterPayment, onReversePayment, onApplyCustomerCredit, onSendPaymentReceipt }: { order: Order; account: AdminCustomerAccount | null; variantOptions: Array<{ product: CatalogProduct; variant: CatalogProduct['variants'][number] }>; onClose: () => void; onUpdateOrder: (id: string, status: string) => void | Promise<void>; onUpdateOrderItems: (order: Order, items: Array<{ variantId: string; quantity: number }>) => void | Promise<void>; onRegisterPayment: (id: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>; onReversePayment: (orderId: string, paymentId: string, reason: string) => void | Promise<void>; onApplyCustomerCredit: (customerId: string, destinationOrderId: string, amount: number, idempotencyKey: string) => void | Promise<void>; onSendPaymentReceipt: (id: string) => void | Promise<void> }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const [editingItemId, setEditingItemId] = useState('');
   const [quantityDraft, setQuantityDraft] = useState(1);
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [orderStatus, setOrderStatus] = useState(order.status);
-  const [modalError, setModalError] = useState<string | null>(null);
+  const [isSavingStatus, setIsSavingStatus] = useState(false);
   const [isSendingReceipt, setIsSendingReceipt] = useState(false);
+  const [creditAmount, setCreditAmount] = useState('');
+  const [paymentRequestKey, setPaymentRequestKey] = useState(() => crypto.randomUUID());
+  const [creditRequestKey, setCreditRequestKey] = useState(() => crypto.randomUUID());
   const isEditable = ['PENDING', 'CONFIRMED', 'PREPARING'].includes(order.status);
   const paidAmount = effectivePaymentAmount(order.payments);
+  const appliedCredit = effectiveCreditAmount(order);
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -1723,27 +1979,26 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
 
   async function saveItemQuantity(item: Order['items'][number]) {
     if (quantityDraft < 1) return;
-    setModalError(null);
     try {
       await onUpdateOrderItems(order, currentItems().map((candidate) => (candidate.variantId === item.variantId ? { ...candidate, quantity: quantityDraft } : candidate)));
       setEditingItemId('');
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
     }
   }
 
   async function removeItem(item: Order['items'][number]) {
     if (order.items.length <= 1) return;
-    setModalError(null);
     try {
       await onUpdateOrderItems(order, currentItems().filter((candidate) => candidate.variantId !== item.variantId));
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
     }
   }
 
   async function addItem(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const form = new FormData(event.currentTarget);
     const variantId = String(form.get('addVariantId') ?? '');
     const quantity = Number(form.get('addQuantity') ?? 0);
@@ -1753,42 +2008,65 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
     const existing = items.find((item) => item.variantId === variantId);
     if (existing) existing.quantity += quantity;
     else items.push({ variantId, quantity });
-    setModalError(null);
     try {
       await onUpdateOrderItems(order, items);
-      event.currentTarget.reset();
+      formElement.reset();
       setIsAddingItem(false);
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
     }
   }
 
   async function saveOrderStatus() {
-    if (isOrderStatusOptionDisabled(order.status, orderStatus)) return;
-    setModalError(null);
+    if (isSavingStatus || orderStatus === order.status || isOrderStatusOptionDisabled(order.status, orderStatus)) return;
+    setIsSavingStatus(true);
     try {
       await onUpdateOrder(order.id, orderStatus);
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
+    } finally {
+      setIsSavingStatus(false);
     }
   }
 
   async function submitPayment(event: FormEvent<HTMLFormElement>) {
-    setModalError(null);
+    const form = new FormData(event.currentTarget);
+    const amount = Number(form.get('amount') ?? 0);
+    if (amount > order.outstandingDebt && !window.confirm(`El pago supera la deuda actual por ${formatPrice(amount - order.outstandingDebt)}. ¿Deseas registrarlo y generar crédito a favor?`)) return;
     try {
       await onRegisterPayment(order.id, event);
+      setPaymentRequestKey(crypto.randomUUID());
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
+    }
+  }
+
+  async function applyCredit() {
+    const amount = Number(creditAmount);
+    if (!account || !Number.isFinite(amount) || amount <= 0) return;
+    if (amount > account.availableCredit) {
+      notifyError('El importe supera el crédito disponible del cliente.');
+      return;
+    }
+    if (amount > order.outstandingDebt) {
+      notifyError('El importe supera la deuda pendiente del pedido.');
+      return;
+    }
+    try {
+      await onApplyCustomerCredit(order.customer.id, order.id, amount, creditRequestKey);
+      setCreditRequestKey(crypto.randomUUID());
+      setCreditAmount('');
+    } catch (error) {
+      notifyError(adminOrderErrorMessage(error));
     }
   }
 
   async function sendReceipt() {
-    setModalError(null);
     setIsSendingReceipt(true);
     try {
       await onSendPaymentReceipt(order.id);
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
     } finally {
       setIsSendingReceipt(false);
     }
@@ -1799,48 +2077,55 @@ function OrderModal({ order, variantOptions, onClose, onUpdateOrder, onUpdateOrd
     if (!window.confirm(`¿Confirmas reversar el pago de ${formatPrice(payment.amount)}? Esta acción no se puede deshacer.`)) return;
     const reason = window.prompt('Indica el motivo del reverso formal:')?.trim() ?? '';
     if (reason.length < 3) {
-      setModalError('El motivo del reverso debe tener al menos 3 caracteres.');
+      notifyError('El motivo del reverso debe tener al menos 3 caracteres.');
       return;
     }
 
-    setModalError(null);
     try {
       await onReversePayment(order.id, payment.id, reason);
     } catch (error) {
-      setModalError(adminOrderErrorMessage(error));
+      notifyError(adminOrderErrorMessage(error));
     }
   }
 
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
       <div aria-labelledby="orderModalTitle" aria-modal="true" className="productModal orderModal" onKeyDown={(event) => handleModalKeyDown(event, onClose)} onMouseDown={(event) => event.stopPropagation()} role="dialog">
-        <div className="modalHeader"><div><p className="eyebrow">Detalle de pedido</p><h3 id="orderModalTitle">Pedido {order.id.slice(0, 8)}</h3></div><button className="iconButton" ref={closeButtonRef} type="button" onClick={onClose}>Cerrar</button></div>
+        <div className="modalHeader orderModalHeader">
+          <div>
+            <p className="eyebrow">Detalle de pedido</p>
+            <div className="orderTitleLine"><h3 id="orderModalTitle">Pedido {formatOrderNumber(order.orderNumber)}</h3><span className={`pill ${orderStatusTone(order.status)}`}>{orderStatusLabel(order.status)}</span><span className={`pill ${paymentStatusTone(order.paymentStatus)}`}>{paymentStatusLabel(order.paymentStatus)}</span></div>
+            <p className="orderCreatedAt">Creado el {formatDateTime(order.createdAt)}</p>
+          </div>
+          <button aria-label="Cerrar detalle del pedido" className="modalCloseButton" ref={closeButtonRef} title="Cerrar" type="button" onClick={onClose}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6.7 5.3 6.3 6.3 6.3-6.3 1.4 1.4-6.3 6.3 6.3 6.3-1.4 1.4-6.3-6.3-6.3 6.3-1.4-1.4 6.3-6.3-6.3-6.3 1.4-1.4Z" /></svg></button>
+        </div>
         <div className="orderModalSummary">
-          <article><span>Cliente</span><strong>{order.customer.firstName} {order.customer.lastName}</strong><small>{order.customer.email}{order.customer.phone ? ` · ${order.customer.phone}` : ''}</small></article>
-          <article><span>Total</span><strong>{formatPrice(order.total)}</strong><small>Subtotal {formatPrice(order.subtotal)} · Entrega {formatPrice(order.deliveryCost)}</small></article>
-          <article><span>Pagado</span><strong>{formatPrice(paidAmount)}</strong><small>{order.payments.length} pagos registrados</small></article>
+          <article className="orderSummaryCustomer"><span>Cliente</span><strong>{order.customer.firstName} {order.customer.lastName}</strong><small>{order.customer.email}{order.customer.phone ? ` · ${order.customer.phone}` : ''}</small></article>
+          <article><span>Total del pedido</span><strong>{formatPrice(order.total)}</strong><small>Subtotal {formatPrice(order.subtotal)} · Entrega {formatPrice(order.deliveryCost)}</small></article>
+          <article><span>Pagado</span><strong>{formatPrice(paidAmount + appliedCredit)}</strong><small>{formatPrice(order.outstandingDebt)} de saldo pendiente</small></article>
         </div>
         <PaymentReceipt order={order} paidAmount={paidAmount} />
-        {modalError ? <p className="statusText errorText modalError">{modalError}</p> : null}
         <div className="orderModalGrid">
           <section className="adminForm orderStatusPanel">
-            <h3>Estado del pedido</h3>
+            <div className="panelHeading"><div><p className="eyebrow">Gestion</p><h3>Estado y productos</h3></div><span className={`pill ${orderStatusTone(order.status)}`}>{isEditable ? 'Editable' : 'Bloqueado'}</span></div>
             <div className="formRow">
-              <label>Pedido<select value={orderStatus} onChange={(event) => setOrderStatus(event.target.value)}><option value="PENDING" disabled={isOrderStatusOptionDisabled(order.status, 'PENDING')}>Pendiente</option><option value="CONFIRMED" disabled={isOrderStatusOptionDisabled(order.status, 'CONFIRMED')}>Confirmado</option><option value="PREPARING" disabled={isOrderStatusOptionDisabled(order.status, 'PREPARING')}>Preparando</option><option value="DELIVERED" disabled={isOrderStatusOptionDisabled(order.status, 'DELIVERED')}>Entregado</option><option value="CANCELLED" disabled={isOrderStatusOptionDisabled(order.status, 'CANCELLED')}>Cancelado</option></select></label>
-            </div>
-            <button className="primary compactButton" type="button" disabled={orderStatus === order.status || isOrderStatusOptionDisabled(order.status, orderStatus)} onClick={saveOrderStatus}>Guardar cambios</button>
+               <label>Pedido<select disabled={isSavingStatus} value={orderStatus} onChange={(event) => setOrderStatus(event.target.value)}><option value="PENDING" disabled={isOrderStatusOptionDisabled(order.status, 'PENDING')}>Pendiente</option><option value="CONFIRMED" disabled={isOrderStatusOptionDisabled(order.status, 'CONFIRMED')}>Confirmado</option><option value="PREPARING" disabled={isOrderStatusOptionDisabled(order.status, 'PREPARING')}>Preparando</option><option value="DELIVERED" disabled={isOrderStatusOptionDisabled(order.status, 'DELIVERED')}>Entregado</option><option value="CANCELLED" disabled={isOrderStatusOptionDisabled(order.status, 'CANCELLED')}>Cancelado</option></select></label>
+             </div>
+             <button className="primary compactButton" type="button" disabled={isSavingStatus || orderStatus === order.status || isOrderStatusOptionDisabled(order.status, orderStatus)} onClick={saveOrderStatus}>{isSavingStatus ? <><span className="loadingSpinner" aria-hidden="true" />Guardando estado...</> : 'Guardar cambios'}</button>
             <div className="orderItemsPreview">{order.items.map((item) => <div className="orderItemRow" key={item.id}><div><span>{item.quantity} x {item.productName}</span><strong>{formatPrice(item.lineTotal)}</strong><small>{item.variantName}</small></div>{editingItemId === item.id ? <div className="itemEditActions"><input aria-label={`Cantidad de ${item.productName}`} type="number" min="1" max="99" value={quantityDraft} onChange={(event) => setQuantityDraft(Number(event.target.value))} /><button className="compactButton" type="button" onClick={() => saveItemQuantity(item)}>Guardar</button><button className="secondaryButton compactButton" type="button" onClick={() => setEditingItemId('')}>Cancelar</button></div> : <div className="itemEditActions"><button className="iconActionButton" type="button" aria-label={`Editar cantidad de ${item.productName}`} disabled={!isEditable} onClick={() => startEditItem(item)}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 16.5V20h3.5L18.1 9.4l-3.5-3.5L4 16.5Zm15.2-8.2 1.1-1.1a1.5 1.5 0 0 0 0-2.1l-1.4-1.4a1.5 1.5 0 0 0-2.1 0l-1.1 1.1 3.5 3.5Z" /></svg></button><button className="iconActionButton dangerButton" type="button" aria-label={`Eliminar ${item.productName}`} disabled={!isEditable || order.items.length <= 1} onClick={() => removeItem(item)}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 21c-1.1 0-2-.9-2-2V7h14v12c0 1.1-.9 2-2 2H7ZM9 4h6l1 1h4v2H4V5h4l1-1Zm0 6v7h2v-7H9Zm4 0v7h2v-7h-2Z" /></svg></button></div>}</div>)}</div>
             <div className="addItemPanel">
               {!isAddingItem ? <button className="secondaryButton" type="button" disabled={!isEditable} onClick={() => setIsAddingItem(true)}>Sumar item o producto al pedido</button> : <form className="addItemForm" onSubmit={addItem}><label>Producto<select name="addVariantId" defaultValue="" required><option value="">Seleccionar producto</option>{variantOptions.map(({ product, variant }) => <option key={variant.id} value={variant.id}>{product.name} · {variant.name} · {variant.availableStock} disp.</option>)}</select></label><label>Cantidad<input name="addQuantity" type="number" min="1" max="99" defaultValue="1" required /></label><div className="modalActions"><button className="secondaryButton" type="button" onClick={() => setIsAddingItem(false)}>Cancelar</button><button type="submit">Sumar al pedido</button></div></form>}
             </div>
           </section>
           <form className="adminForm paymentForm" onSubmit={submitPayment}>
-            <h3>Registrar pago</h3>
+            <div className="panelHeading"><div><p className="eyebrow">Cobranza</p><h3>Registrar pago</h3></div><strong className="panelBalance">{formatPrice(order.outstandingDebt)} pendiente</strong></div>
             <label>Monto<input name="amount" type="number" min="0.01" step="0.01" placeholder="0" required /></label>
             <label>Metodo<select name="method" defaultValue="" required><option value="" disabled>Seleccionar forma de pago</option>{PAYMENT_METHOD_OPTIONS.map((method) => <option key={method.value} value={method.value}>{method.label}</option>)}</select></label>
-            <label>Notas<input name="notes" placeholder="Referencia o comentario" /></label>
-            <button className="compactButton" type="submit">Registrar pago</button>
-            <div className="paymentHistory">
+             <label>Notas<input name="notes" placeholder="Referencia o comentario" /></label>
+             <input name="idempotencyKey" type="hidden" value={paymentRequestKey} readOnly />
+             <button className="compactButton" type="submit">Registrar pago</button>
+             {order.status !== 'PENDING' && order.status !== 'CANCELLED' && account && account.availableCredit > 0 && order.outstandingDebt > 0 ? <div className="creditApplicationPanel"><h4>Aplicar crédito disponible</h4><p className="statusText compactStatus">Crédito del cliente: {formatPrice(account.availableCredit)} · Deuda del pedido: {formatPrice(order.outstandingDebt)}</p><label>Importe a aplicar<input min="0.01" max={Math.min(account.availableCredit, order.outstandingDebt)} step="0.01" type="number" value={creditAmount} onChange={(event) => setCreditAmount(event.target.value)} /></label><button className="secondaryButton compactButton" type="button" onClick={() => void applyCredit()}>Aplicar crédito</button></div> : null}
+             <div className="paymentHistory">
               <h3>Historial de pagos</h3>
               {order.payments.length === 0 ? <p className="statusText">Sin pagos registrados.</p> : order.payments.map((payment) => <div className="paymentHistoryRow" key={payment.id}><span><strong>{formatPrice(payment.amount)}</strong><small>{paymentMethodLabel(payment.method)} · {formatDateTime(payment.paidAt ?? payment.createdAt)}</small>{payment.status === 'REFUNDED' ? <small className="reversedPaymentText">Reversado: {payment.reversalReason || 'sin motivo'}</small> : null}</span>{payment.status === 'REFUNDED' ? <span className="pill muted">Reversado</span> : <button className="secondaryButton compactButton" type="button" onClick={() => reversePayment(payment)}>Reversar pago</button>}</div>)}
             </div>
@@ -1867,7 +2152,7 @@ function PaymentReceipt({ order, paidAmount }: { order: Order; paidAmount: numbe
     <section className="paymentReceipt" aria-label="Comprobante de pago imprimible">
       <div className="receiptHeader">
         <div><p className="eyebrow">Comprobante de pago</p><h2>Natura reseller</h2><p>Revendedora independiente · No es factura fiscal.</p></div>
-        <div><strong>Pedido {order.id.slice(0, 8)}</strong><span>{formatDateTime(order.createdAt)}</span></div>
+        <div><strong>Pedido {formatOrderNumber(order.orderNumber)}</strong><span>{formatDateTime(order.createdAt)}</span></div>
       </div>
       <div className="receiptCustomer"><span>Cliente</span><strong>{order.customer.firstName} {order.customer.lastName}</strong><small>{order.customer.email}{order.customer.phone ? ` · ${order.customer.phone}` : ''}</small></div>
       <div className="receiptTable" role="table" aria-label="Items del pedido">
@@ -2001,5 +2286,12 @@ function DeliveryMethodModal({ method, onClose, onUpsertDeliveryMethod }: { meth
 }
 
 function OrderList({ orders, onCancelOrder }: { orders: Order[]; onCancelOrder: (id: string) => void }) {
-  return <div className="orderList">{orders.map((order) => <article className="orderCard" key={order.id}><div className="orderHeader"><strong>Pedido {order.id.slice(0, 8)}</strong><span>{order.status} · {order.paymentStatus}</span></div>{order.items.map((item) => <p key={item.id}>{item.quantity} x {item.productName} ({formatPrice(item.lineTotal)})</p>)}<strong>Total {formatPrice(order.total)}</strong>{order.status === 'PENDING' ? <button className="secondaryButton" type="button" onClick={() => onCancelOrder(order.id)}>Cancelar pedido pendiente</button> : null}</article>)}</div>;
+  return <div className="orderList">{orders.map((order) => <article className="orderCard customerOrderCard" key={order.id}>
+    <header className="customerOrderHeader">
+      <div><span className="orderCardLabel">Pedido</span><strong>{formatOrderNumber(order.orderNumber)}</strong></div>
+      <div className="orderStatusGroup"><span className={`orderStatusBadge ${orderStatusTone(order.status)}`}>{orderStatusLabel(order.status)}</span><span className={`orderStatusBadge ${paymentStatusTone(order.paymentStatus)}`}>{paymentStatusLabel(order.paymentStatus)}</span></div>
+    </header>
+    <div className="customerOrderItems">{order.items.map((item) => <div className="customerOrderItem" key={item.id}><span className="customerOrderQuantity">{item.quantity}x</span><span className="customerOrderProduct">{item.productName}</span><strong>{formatPrice(item.lineTotal)}</strong></div>)}</div>
+    <footer className="customerOrderFooter"><strong>Total <span>{formatPrice(order.total)}</span></strong>{order.status === 'PENDING' ? <button className="secondaryButton" type="button" onClick={() => onCancelOrder(order.id)}>Cancelar pedido pendiente</button> : null}</footer>
+  </article>)}</div>;
 }
