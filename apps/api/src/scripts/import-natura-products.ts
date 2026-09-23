@@ -77,6 +77,19 @@ const products: NaturaSeedProduct[] = [
   { productId: 'NATARG-73574', name: 'Frescor Ekos Maracuyá 150 ml', brand: 'Ekos', categoryId: 'perfumeria-para-quien', categoryName: 'para quién', price: 46400, stockQuantity: 10, shortDescription: 'fragancia encantadora y refrescante como un descanso en el vaivén de una hamaca.', inStock: true, orderable: true },
 ];
 
+function productUploadFiles() {
+  const candidateDirs = [
+    path.resolve(process.cwd(), 'uploads/products'),
+    '/app/uploads/products',
+  ];
+  const uploadDir = candidateDirs.find((directory) => fs.existsSync(directory));
+  if (!uploadDir) return [];
+
+  return fs.readdirSync(uploadDir)
+    .filter((filename) => /\.(?:jpg|jpeg|png|webp)$/i.test(filename))
+    .sort();
+}
+
 function slugify(value: string) {
   return value
     .normalize('NFD')
@@ -93,6 +106,7 @@ function cleanDescription(value?: string | null) {
 
 async function main() {
   let imported = 0;
+  const uploadFiles = productUploadFiles();
 
   for (const item of products) {
     const productName = item.friendlyName ?? item.name;
@@ -103,7 +117,7 @@ async function main() {
       create: { name: item.categoryName, slug: item.categoryId, isActive: true },
     });
 
-    await prisma.product.upsert({
+    const product = await prisma.product.upsert({
       where: { slug: productSlug },
       update: {
         categoryId: category.id,
@@ -150,6 +164,21 @@ async function main() {
         },
       },
     });
+
+    for (const filename of uploadFiles.filter((candidate) => candidate.startsWith(`${item.productId}_`))) {
+      const url = `/uploads/products/${filename}`;
+      const existingImage = await prisma.productImage.findFirst({ where: { productId: product.id, url } });
+      if (!existingImage) {
+        await prisma.productImage.create({
+          data: {
+            productId: product.id,
+            url,
+            altText: productName,
+            sortOrder: uploadFiles.indexOf(filename),
+          },
+        });
+      }
+    }
 
     imported += 1;
   }
