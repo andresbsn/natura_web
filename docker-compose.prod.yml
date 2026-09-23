@@ -41,7 +41,7 @@ services:
     ports:
       - "${API_BIND:-127.0.0.1}:${API_HOST_PORT:-3027}:3000"
     volumes:
-      - natura_uploads:/app/uploads
+      - natura_uploads:/app/apps/api/uploads
 
   web:
     build:
