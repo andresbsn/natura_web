@@ -2172,7 +2172,7 @@ function PaymentReceipt({ order, paidAmount }: { order: Order; paidAmount: numbe
   return (
     <section className="paymentReceipt" aria-label="Comprobante de pago imprimible">
       <div className="receiptHeader">
-        <div><p className="eyebrow">Comprobante de pago</p><h2>Natura reseller</h2><p>Revendedora independiente · No es factura fiscal.</p></div>
+        <div><p className="eyebrow">Comprobante de pago</p></div>
         <div><strong>Pedido {formatOrderNumber(order.orderNumber)}</strong><span>{formatDateTime(order.createdAt)}</span></div>
       </div>
       <div className="receiptCustomer"><span>Cliente</span><strong>{order.customer.firstName} {order.customer.lastName}</strong><small>{order.customer.email}{order.customer.phone ? ` · ${order.customer.phone}` : ''}</small></div>
@@ -2180,16 +2180,19 @@ function PaymentReceipt({ order, paidAmount }: { order: Order; paidAmount: numbe
         <div className="receiptTableHeader" role="row"><span>Producto</span><span>Cant.</span><span>Total</span></div>
         {order.items.map((item) => <div className="receiptTableRow" key={item.id} role="row"><span>{item.productName}<small>{item.variantName}</small></span><span>{item.quantity}</span><span>{formatPrice(item.lineTotal)}</span></div>)}
       </div>
-      <div className="receiptTotals">
-        <span>Subtotal <strong>{formatPrice(order.subtotal)}</strong></span>
-        <span>Entrega <strong>{formatPrice(order.deliveryCost)}</strong></span>
-        <span>Total <strong>{formatPrice(order.total)}</strong></span>
-        <span>Pagado <strong>{formatPrice(paidAmount)}</strong></span>
-        <span>Saldo pendiente <strong>{formatPrice(balance)}</strong></span>
+      <div className="receiptTotals" role="table" aria-label="Resumen del comprobante">
+        <div className="receiptTotalCell" role="row"><span>Subtotal</span><strong>{formatPrice(order.subtotal)}</strong></div>
+        <div className="receiptTotalCell" role="row"><span>Entrega</span><strong>{formatPrice(order.deliveryCost)}</strong></div>
+        <div className="receiptTotalCell receiptTotalHighlight" role="row"><span>Total</span><strong>{formatPrice(order.total)}</strong></div>
+        <div className="receiptTotalCell" role="row"><span>Pagado</span><strong>{formatPrice(paidAmount)}</strong></div>
+        <div className="receiptTotalCell receiptBalanceHighlight" role="row"><span>Saldo pendiente</span><strong>{formatPrice(balance)}</strong></div>
       </div>
       <div className="receiptPayments">
         <h3>Pagos registrados</h3>
-        {order.payments.length === 0 ? <p>Sin pagos registrados.</p> : order.payments.map((payment) => <p key={payment.id} className={payment.status === 'REFUNDED' ? 'reversedPaymentText' : undefined}><strong>{formatPrice(payment.amount)}</strong> · {payment.status === 'REFUNDED' ? 'Reversado' : paymentMethodLabel(payment.method)} · {formatDateTime(payment.paidAt ?? payment.createdAt)}{payment.status === 'REFUNDED' && payment.reversalReason ? ` · ${payment.reversalReason}` : ''}</p>)}
+        {order.payments.length === 0 ? <p>Sin pagos registrados.</p> : <div className="receiptPaymentsTable" role="table" aria-label="Pagos registrados">
+          <div className="receiptPaymentsTableHeader" role="row"><span>Importe</span><span>Medio de pago</span><span>Fecha</span><span>Estado</span></div>
+          {order.payments.map((payment) => <div className={`receiptPaymentsTableRow${payment.status === 'REFUNDED' ? ' reversedPaymentText' : ''}`} key={payment.id} role="row"><strong>{formatPrice(payment.amount)}</strong><span>{paymentMethodLabel(payment.method)}</span><span>{formatDateTime(payment.paidAt ?? payment.createdAt)}</span><span>{payment.status === 'REFUNDED' ? `Reversado${payment.reversalReason ? ` · ${payment.reversalReason}` : ''}` : 'Registrado'}</span></div>)}
+        </div>}
       </div>
     </section>
   );
