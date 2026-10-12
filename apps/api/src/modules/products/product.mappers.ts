@@ -15,6 +15,7 @@ function mapPrice(price: PriceWithCatalog) {
   return {
     id: price.id,
     amount: decimalToNumber(price.amount),
+    catalogId: price.catalogId,
     catalog: price.catalog
       ? {
           id: price.catalog.id,

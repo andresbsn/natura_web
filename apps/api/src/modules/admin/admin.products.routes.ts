@@ -45,10 +45,15 @@ const imageUpload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
+const formBooleanSchema = z.preprocess(
+  (value) => (value === 'true' ? true : value === 'false' ? false : value),
+  z.boolean(),
+);
+
 const categorySchema = z.object({
   name: z.string().min(1).max(120),
   slug: z.string().min(1).max(140).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  isActive: z.boolean().optional(),
+  isActive: formBooleanSchema.optional(),
 });
 
 const imageUrlSchema = z.string().refine(
@@ -68,7 +73,7 @@ const variantSchema = z.object({
   attributes: z.record(z.unknown()).optional(),
   stockQuantity: z.number().int().min(0).default(0),
   price: z.number().positive(),
-  isActive: z.boolean().optional(),
+  isActive: formBooleanSchema.optional(),
 });
 
 const productCreateSchema = z.object({
@@ -77,12 +82,12 @@ const productCreateSchema = z.object({
   slug: z.string().min(1).max(200).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   description: z.string().max(3000).optional(),
   line: z.string().max(120).optional(),
-  isActive: z.boolean().optional(),
+  isActive: formBooleanSchema.optional(),
   images: z.array(imageSchema).default([]),
   variants: z.array(variantSchema).min(1),
 });
 
-const productUpdateSchema = productCreateSchema.partial().extend({
+export const productUpdateSchema = productCreateSchema.partial().extend({
   variants: z.array(variantSchema).optional(),
   images: z.array(imageSchema).optional(),
 });
@@ -166,7 +171,7 @@ function productPayload(body: Record<string, unknown>, file: Express.Multer.File
 }
 
 function parseProductCreateBody(body: unknown, file: Express.Multer.File | undefined) {
-  if (file || body instanceof Object && !Array.isArray(body) && 'sku' in body) {
+  if (file || isMultipartProductBody(body)) {
     return productCreateSchema.parse(productPayload(body as Record<string, unknown>, file));
   }
 
@@ -174,11 +179,15 @@ function parseProductCreateBody(body: unknown, file: Express.Multer.File | undef
 }
 
 function parseProductUpdateBody(body: unknown, file: Express.Multer.File | undefined) {
-  if (file || body instanceof Object && !Array.isArray(body) && 'sku' in body) {
+  if (file || isMultipartProductBody(body)) {
     return productUpdateSchema.parse(productPayload(body as Record<string, unknown>, file));
   }
 
   return productUpdateSchema.parse(body);
+}
+
+export function isMultipartProductBody(body: unknown): body is Record<string, unknown> {
+  return body !== null && typeof body === 'object' && !Array.isArray(body) && 'sku' in body;
 }
 
 adminProductsRouter.get('/categories', async (_req, res, next) => {

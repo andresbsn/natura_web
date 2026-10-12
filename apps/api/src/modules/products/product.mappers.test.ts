@@ -16,5 +16,6 @@ describe('product response variants', () => {
 
     expect(mapProduct(product).variants.map((variant) => variant.id)).toEqual(['active']);
     expect(mapProduct(product, true, true).variants.map((variant) => variant.id)).toEqual(['active', 'inactive']);
+    expect(mapProduct(product, true, true).variants[0]?.prices[0]).toMatchObject({ id: 'price-1', amount: 10, catalogId: null });
   });
 });

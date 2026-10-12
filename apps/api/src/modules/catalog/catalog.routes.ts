@@ -62,6 +62,7 @@ catalogRouter.get('/products', async (req, res, next) => {
                 { name: { contains: query.search, mode: 'insensitive' } },
                 { description: { contains: query.search, mode: 'insensitive' } },
                 { line: { contains: query.search, mode: 'insensitive' } },
+                { category: { name: { contains: query.search, mode: 'insensitive' } } },
               ],
             }
           : {}),

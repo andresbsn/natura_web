@@ -193,6 +193,7 @@ function resolveApiUrl() {
 }
 
 const apiUrl = resolveApiUrl();
+
 const promoSlides = [
   { title: 'Promos de catalogo', text: 'Seleccion de productos con precios actualizados y stock administrado.' },
   { title: 'Pedidos registrados', text: 'Armá tu carrito, iniciá sesión y confirmá tu pedido online.' },
@@ -469,7 +470,7 @@ function ProductCard({ product, navigate, onAdd }: { product: CatalogProduct; na
           <button className="addToCartButton" type="button" disabled={!variant || !variant.currentPrice || variant.availableStock < 1} onClick={() => onAdd(product, variant?.id)}>
             Agregar al carrito
           </button>
-          <button className="textLink detailLink" type="button" onClick={() => navigate(`/productos/${product.slug}`)}>Ver detalle</button>
+          <button className="addToCartButton" type="button" onClick={() => navigate(`/productos/${product.slug}`)}>Ver detalle</button>
         </div>
       </div>
     </article>
@@ -611,13 +612,15 @@ export function App() {
     }
   }, [expireSession, refreshSession]);
 
-  async function loadCatalog(page = 1) {
+  async function loadCatalog(page = 1, search = '') {
     setIsLoading(true);
     setCatalogError(null);
 
     try {
+      const query = new URLSearchParams({ page: String(page), pageSize: search ? '100' : '24' });
+      if (search) query.set('search', search);
       const [productsData, categoriesData, deliveryMethodsData] = await Promise.all([
-        apiRequest<{ products: CatalogProduct[]; pagination?: CatalogPagination }>(`/api/catalog/products?page=${page}&pageSize=24`),
+        apiRequest<{ products: CatalogProduct[]; pagination?: CatalogPagination }>(`/api/catalog/products?${query.toString()}`),
         apiRequest<{ categories: Category[] }>('/api/catalog/categories'),
         apiRequest<{ deliveryMethods: DeliveryMethod[] }>('/api/catalog/delivery-methods'),
       ]);
@@ -960,12 +963,16 @@ export function App() {
     body.append('sku', String(form.get('editSku') ?? ''));
     body.append('variantName', String(form.get('editVariantName') ?? 'Unidad'));
     body.append('stockQuantity', String(form.get('editStockQuantity') ?? 0));
-     body.append('price', String(form.get('editPrice') ?? 0));
+    body.append('price', String(form.get('editPrice') ?? 0));
     if (image instanceof File && image.size > 0) body.append('image', image);
-    await authenticatedRequest(`/api/admin/products/${form.get('editProductId')}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body });
+    const productId = String(form.get('editProductId') ?? '');
+    const response = await authenticatedRequest<{ product?: CatalogProduct }>(`/api/admin/products/${productId}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` }, body });
+    const updatedProduct = response.product;
+    if (updatedProduct) {
+      setAdminProducts((current) => current.map((product) => product.id === updatedProduct.id ? updatedProduct : product));
+    }
     notifySuccess('Producto actualizado exitosamente.');
     await loadCatalog();
-    await loadAdminData();
   }
 
   async function createAccountAdjustment(customerId: string, event: FormEvent<HTMLFormElement>) {
@@ -1161,7 +1168,7 @@ export function App() {
   }
 
   function renderPage() {
-    if (path === '/productos') return <ProductsPage isLoading={isLoading} catalogError={catalogError} products={products} navigate={navigate} pagination={catalogPagination} onPageChange={(page) => void loadCatalog(page)} onAdd={addToCart} />;
+    if (path === '/productos') return <ProductsPage isLoading={isLoading} catalogError={catalogError} products={products} navigate={navigate} pagination={catalogPagination} onSearch={(search) => void loadCatalog(1, search)} onPageChange={(page) => void loadCatalog(page)} onAdd={addToCart} />;
     if (path.match(/^\/productos\/[^/]+$/)) return <ProductDetailPage product={productDetail} loading={productDetailLoading} error={catalogError} onAdd={addToCart} navigate={navigate} />;
     if (path === '/login') return <LoginPage error={error} onLogin={handleLogin} onResendVerification={handleResendVerification} navigate={navigate} />;
     if (path === '/recuperar-contrasena') return <PasswordResetRequestPage onSubmit={async (email) => { await apiRequest('/api/auth/request-password-reset', { method: 'POST', body: JSON.stringify({ email }) }); notifySuccess('Si el email corresponde a una cuenta activa, recibirás instrucciones.'); }} error={error} />;
@@ -1241,7 +1248,7 @@ function HomePage({ products, navigate, onAdd }: { products: CatalogProduct[]; n
   );
 }
 
-function ProductsPage({ isLoading, catalogError, products, navigate, pagination, onPageChange, onAdd }: { isLoading: boolean; catalogError: string | null; products: CatalogProduct[]; navigate: (path: string) => void; pagination: CatalogPagination | null; onPageChange: (page: number) => void; onAdd: (product: CatalogProduct, variantId?: string, quantity?: number) => void }) {
+function ProductsPage({ isLoading, catalogError, products, navigate, pagination, onSearch, onPageChange, onAdd }: { isLoading: boolean; catalogError: string | null; products: CatalogProduct[]; navigate: (path: string) => void; pagination: CatalogPagination | null; onSearch: (search: string) => void; onPageChange: (page: number) => void; onAdd: (product: CatalogProduct, variantId?: string, quantity?: number) => void }) {
   const [search, setSearch] = useState('');
   const normalized = search.trim().toLowerCase();
   const filtered = normalized
@@ -1251,12 +1258,12 @@ function ProductsPage({ isLoading, catalogError, products, navigate, pagination,
   return (
     <section className="section pageSection">
       <div className="sectionHeader"><div><p className="eyebrow">Catalogo</p><h1>Todos los productos.</h1></div></div>
-      <input className="searchInput" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por producto, categoria o linea" />
+       <input className="searchInput" value={search} onChange={(event) => { const value = event.target.value; setSearch(value); onSearch(value.trim().toLowerCase()); }} placeholder="Buscar por producto, categoria o linea" />
       {isLoading ? <p className="statusText">Cargando productos...</p> : null}
       {catalogError ? <p className="statusText errorText">{catalogError}</p> : null}
       {!isLoading && !catalogError && filtered.length === 0 ? <p className="statusText">No encontramos productos para esa busqueda.</p> : null}
         <div className="productGrid">{filtered.map((product) => <ProductCard key={product.id} product={product} navigate={navigate} onAdd={onAdd} />)}</div>
-       {pagination && pagination.totalPages > 1 ? <nav className="pagination" aria-label="Paginación de productos"><button type="button" disabled={pagination.page <= 1} onClick={() => onPageChange(pagination.page - 1)}>Anterior</button><span>Página {pagination.page} de {pagination.totalPages}</span><button type="button" disabled={pagination.page >= pagination.totalPages} onClick={() => onPageChange(pagination.page + 1)}>Siguiente</button></nav> : null}
+        {pagination && !normalized && pagination.totalPages > 1 ? <nav className="pagination" aria-label="Paginación de productos"><button type="button" disabled={pagination.page <= 1} onClick={() => onPageChange(pagination.page - 1)}>Anterior</button><span>Página {pagination.page} de {pagination.totalPages}</span><button type="button" disabled={pagination.page >= pagination.totalPages} onClick={() => onPageChange(pagination.page + 1)}>Siguiente</button></nav> : null}
     </section>
   );
 }
