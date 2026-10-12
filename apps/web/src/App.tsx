@@ -1,6 +1,20 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 
+function createIdempotencyKey() {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID();
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
 type CatalogProduct = {
   id: string;
   name: string;
@@ -1435,7 +1449,7 @@ function AccountsAdmin({ accounts, onCreateAccountAdjustment }: { accounts: Admi
 
 function AccountAdjustmentModal({ account, onClose, onCreateAccountAdjustment }: { account: AdminCustomerAccount; onClose: () => void; onCreateAccountAdjustment: (customerId: string, event: FormEvent<HTMLFormElement>) => void | Promise<void> }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const idempotencyKey = useRef(crypto.randomUUID());
+  const idempotencyKey = useRef(createIdempotencyKey());
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -1954,8 +1968,8 @@ function OrderModal({ order, account, variantOptions, onClose, onUpdateOrder, on
   const [isSavingStatus, setIsSavingStatus] = useState(false);
   const [isSendingReceipt, setIsSendingReceipt] = useState(false);
   const [creditAmount, setCreditAmount] = useState('');
-  const [paymentRequestKey, setPaymentRequestKey] = useState(() => crypto.randomUUID());
-  const [creditRequestKey, setCreditRequestKey] = useState(() => crypto.randomUUID());
+  const [paymentRequestKey, setPaymentRequestKey] = useState(createIdempotencyKey);
+  const [creditRequestKey, setCreditRequestKey] = useState(createIdempotencyKey);
   const isEditable = ['PENDING', 'CONFIRMED', 'PREPARING'].includes(order.status);
   const paidAmount = effectivePaymentAmount(order.payments);
   const appliedCredit = effectiveCreditAmount(order);
@@ -2035,7 +2049,7 @@ function OrderModal({ order, account, variantOptions, onClose, onUpdateOrder, on
     if (amount > order.outstandingDebt && !window.confirm(`El pago supera la deuda actual por ${formatPrice(amount - order.outstandingDebt)}. ¿Deseas registrarlo y generar crédito a favor?`)) return;
     try {
       await onRegisterPayment(order.id, event);
-      setPaymentRequestKey(crypto.randomUUID());
+      setPaymentRequestKey(createIdempotencyKey());
     } catch (error) {
       notifyError(adminOrderErrorMessage(error));
     }
@@ -2054,7 +2068,7 @@ function OrderModal({ order, account, variantOptions, onClose, onUpdateOrder, on
     }
     try {
       await onApplyCustomerCredit(order.customer.id, order.id, amount, creditRequestKey);
-      setCreditRequestKey(crypto.randomUUID());
+      setCreditRequestKey(createIdempotencyKey());
       setCreditAmount('');
     } catch (error) {
       notifyError(adminOrderErrorMessage(error));
